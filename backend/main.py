@@ -9,6 +9,10 @@ from pydantic import BaseModel
 import sys
 sys.path.append(os.path.dirname(__file__))
 from agent import run_job_finder_agent
+from db import init_db, save_job, get_all_jobs, toggle_applied, delete_all_jobs
+
+# Initialize database schema
+init_db()
 
 app = FastAPI(title="C2C Job Finder Backend")
 
@@ -37,7 +41,7 @@ async def publish_log(msg: str):
             pass
 
 async def run_agent_task(query: str):
-    """Background task to run the agent and save results to jobs.json."""
+    """Background task to run the agent and save results to the SQLite database."""
     global agent_status
     try:
         async def log_callback(thought: str):
@@ -45,29 +49,53 @@ async def run_agent_task(query: str):
         
         results = await run_job_finder_agent(query, log_callback=log_callback)
         
-        # Save results to jobs.json inside the backend directory
-        jobs_file = os.path.join(os.path.dirname(__file__), "jobs.json")
-        with open(jobs_file, "w") as f:
-            json.dump(results, f, indent=2)
+        # Save results to local SQLite database
+        jobs_list = []
+        if hasattr(results, "jobs"):
+            jobs_list = results.jobs
+        elif isinstance(results, dict) and "jobs" in results:
+            jobs_list = results["jobs"]
+        
+        for job in jobs_list:
+            job_dict = job.model_dump() if hasattr(job, "model_dump") else (job.dict() if hasattr(job, "dict") else dict(job))
+            save_job(job_dict)
             
-        await publish_log("\n[Backend] Jobs list successfully updated in jobs.json!\n")
+        await publish_log("\n[Backend] Jobs list successfully updated in the SQLite database!\n")
     except Exception as e:
         await publish_log(f"\n[Backend Error] Agent failed: {e}\n")
     finally:
         agent_status["status"] = "idle"
         agent_status["query"] = None
 
+class ApplyRequest(BaseModel):
+    applied: bool
+
 @app.get("/api/jobs")
 async def get_jobs():
-    """Returns the list of jobs currently saved in jobs.json."""
-    jobs_file = os.path.join(os.path.dirname(__file__), "jobs.json")
-    if os.path.exists(jobs_file):
-        try:
-            with open(jobs_file, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error reading jobs.json: {e}")
-    return {"jobs": []}
+    """Returns the list of jobs currently saved in the database."""
+    try:
+        jobs = get_all_jobs()
+        return {"jobs": jobs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading database: {e}")
+
+@app.patch("/api/jobs/{job_id}/apply")
+async def mark_applied(job_id: int, req: ApplyRequest):
+    """Marks a job as applied or not applied."""
+    try:
+        toggle_applied(job_id, req.applied)
+        return {"success": True, "job_id": job_id, "applied": req.applied}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating job: {e}")
+
+@app.post("/api/jobs/clear")
+async def clear_jobs():
+    """Clears all jobs from the database."""
+    try:
+        delete_all_jobs()
+        return {"success": True, "message": "All jobs cleared from database."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error clearing database: {e}")
 
 @app.get("/api/status")
 async def get_status():

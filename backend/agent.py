@@ -130,8 +130,10 @@ async def run_job_finder_agent(query: str, log_callback=None):
     async with Agent(config) as agent:
         prompt = (
             f"Search for and compile a list of at least 5 to 10 C2C Data Engineer job postings matching "
-            f"the query '{query}'. Use search queries like 'C2C Data Engineer jobs', 'Corp-to-Corp Data Engineer', "
-            f"or 'Contract Data Engineer C2C'. Filter out jobs that are strictly W2 or do not allow contract terms."
+            f"the query '{query}'. Actively search across major portals like LinkedIn, Indeed, Monster, Dice, "
+            f"and other tech job boards. Use targeted search queries like 'C2C Data Engineer site:linkedin.com', "
+            f"'Corp-to-Corp Data Engineer site:indeed.com', 'Contract Data Engineer C2C site:monster.com', "
+            f"or 'Data Engineer C2C site:dice.com'. Filter out jobs that are strictly W2 or do not allow contract terms."
         )
         
         response = await agent.chat(prompt)
