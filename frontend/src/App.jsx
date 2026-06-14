@@ -23,6 +23,7 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
   const [activeAgentTool, setActiveAgentTool] = useState(null);
+  const [healthStatus, setHealthStatus] = useState('unknown');
   
   // Filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -188,6 +189,25 @@ function App() {
         eventSourceRef.current.close();
       }
     };
+  }, []);
+
+  // Poll backend health status
+  useEffect(() => {
+    const checkHealth = async () => {
+      try {
+        const resp = await fetch('/api/health');
+        if (resp.ok) {
+          setHealthStatus('ok');
+        } else {
+          setHealthStatus('error');
+        }
+      } catch (err) {
+        setHealthStatus('error');
+      }
+    };
+    checkHealth();
+    const interval = setInterval(checkHealth, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   // Poll status when agent is running
@@ -566,6 +586,16 @@ function App() {
             <span>Agent Active: {activeAgentTool}</span>
           </div>
         )}
+
+        {/* Backend Health Badge */}
+        <div className="logo-badge" style={{ 
+          background: healthStatus === 'ok' ? 'rgba(16, 185, 129, 0.2)' : healthStatus === 'error' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(107, 114, 128, 0.2)',
+          color: healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--text-muted)',
+          display: 'flex', alignItems: 'center', gap: '0.4rem', border: `1px solid ${healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--border)'}`
+        }}>
+          <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--text-muted)' }}></div>
+          <span>Backend: {healthStatus === 'ok' ? 'Online' : healthStatus === 'error' ? 'Offline' : 'Checking...'}</span>
+        </div>
 
         <div className="header-actions">
           <button 

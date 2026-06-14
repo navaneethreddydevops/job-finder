@@ -97,6 +97,11 @@ async def clear_jobs():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clearing database: {e}")
 
+@app.get("/api/health")
+async def health_check():
+    """Returns the health status of the backend."""
+    return {"status": "ok"}
+
 @app.get("/api/status")
 async def get_status():
     """Returns the current running status of the job finder agent."""
