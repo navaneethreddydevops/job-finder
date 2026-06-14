@@ -85,20 +85,18 @@ async def run_job_finder_agent(query: str, log_callback=None):
         query: Search criteria, e.g. "C2C Data Engineer"
         log_callback: Async function to stream thoughts/logs to (receives strings)
     """
-    # Verify API key
+    # Using Gemini CLI authenticated session if GEMINI_API_KEY is not set or is the placeholder
     api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        err_msg = "Error: GEMINI_API_KEY is not set in your environment or .env file."
-        if log_callback:
-            await log_callback(f"{err_msg}\n")
-        raise ValueError(err_msg)
+    if not api_key or api_key == "your_gemini_api_key_here":
+        os.environ.pop("GEMINI_API_KEY", None)
+        print("[Agent] No valid GEMINI_API_KEY found, using default authenticated session.")
 
     from google.antigravity.hooks import hooks
 
     # Local hooks to capture tool calls and stream them to the log callback
     @hooks.pre_tool_call_decide
     async def pre_tool_hook(data: types.ToolCall) -> types.HookResult:
-        msg = f"[Tool Call] Running tool '{data.name}' with arguments: {data.arguments}\n"
+        msg = f"[Tool Call] Running tool '{data.name}' with arguments: {data.args}\n"
         if log_callback:
             await log_callback(msg)
         return types.HookResult(allow=True)
