@@ -12,8 +12,8 @@ Reference: https://code.claude.com/docs/en/agent-sdk/overview
 
 The job-finder orchestrator (`backend/agent.py`) previously relied on
 `permission_mode="bypassPermissions"` alone and never declared which tools the agent
-was allowed to use. We now explicitly grant the agent the **full built-in toolset** plus
-the project's MCP tools, so behaviour is intentional and documented.
+was allowed to use. We now explicitly grant the agent the **full built-in toolset**
+(no MCP integration), so behaviour is intentional and documented.
 
 **Built-in tools granted** (per the Agent SDK overview):
 
@@ -30,14 +30,13 @@ the project's MCP tools, so behaviour is intentional and documented.
 | `Task`        | Spawn the `job_scout` subagent (fan-out) |
 | `TodoWrite`   | Track multi-step plans |
 
-**MCP tools granted** (wildcards):
-
-- `mcp__job_finder_tools__web_search`, `mcp__job_finder_tools__fetch_webpage_content`
-- `mcp__puppeteer__*` (headless browser)
+**Web tooling**: the agent uses Claude's built-in `WebSearch` and `WebFetch` only —
+there is **no MCP integration** (the former `job_finder_tools` and `puppeteer` MCP
+servers were removed).
 
 Implementation: a module-level `AGENT_ALLOWED_TOOLS` list passed to
 `ClaudeAgentOptions(allowed_tools=...)`. The `job_scout` subagent keeps its narrower
-MCP-only toolset.
+toolset (`WebSearch`, `WebFetch`).
 
 ---
 

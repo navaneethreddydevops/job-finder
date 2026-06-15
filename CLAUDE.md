@@ -18,7 +18,6 @@ job-finder/
 │   ├── resume.py       # Resume optimizer router: docx parse/generate + Claude call
 │   ├── main.py         # FastAPI app: /api/pull, /api/jobs, /api/stream (SSE), etc.
 │   ├── db.py           # SQLite persistence (jobs.db) + de-duplication
-│   ├── mcp_server.py   # FastMCP server exposing web_search + fetch_webpage_content
 │   ├── diag.py         # Standalone smoke-test harness for the backend
 │   └── jobs.db         # SQLite database (jobs, users, resume_jobs)
 ├── frontend/
@@ -28,14 +27,14 @@ job-finder/
 │       ├── Dashboard.jsx   # Job dashboard (state, SSE, WebMCP tools)
 │       └── pages/          # Login, Register, Profile, ResumeOptimizer
 ├── app_spec.md         # Spec for auth + resume optimizer + agent tools
-├── .claude/launch.json # Preview server definitions (Frontend, Backend, MCP)
+├── .claude/launch.json # Preview server definitions (Frontend, Backend)
 └── pyproject.toml      # Python deps (managed with uv)
 ```
 
 ## Running
 
-Python is managed with **uv**. The backend, frontend, and MCP server are also defined
-as preview servers in `.claude/launch.json`.
+Python is managed with **uv**. The backend and frontend are also defined as preview
+servers in `.claude/launch.json`.
 
 ```bash
 # Backend (FastAPI on :8000, serves built frontend if frontend/dist exists)
@@ -67,9 +66,8 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
   running them in parallel, then merges and de-duplicates the results.
 - `model=None` (inherits whatever model the `claude` CLI is configured with);
   `max_turns=80`; `permission_mode="bypassPermissions"`.
-- **MCP servers** (`mcp_servers`): `puppeteer`
-  (`@modelcontextprotocol/server-puppeteer`, headless browser) and `job_finder_tools`
-  (local `mcp_server.py`).
+- **Web tooling**: Claude's built-in `WebSearch` and `WebFetch` only — there is **no MCP
+  integration**. The scouts search and read job boards with these built-in tools.
 - **Structured output** is enforced via `output_format=JobList.model_json_schema()`;
   the stream is also parsed for a ```json fenced block as a fallback.
 
@@ -88,12 +86,13 @@ shown. This is enforced at every layer, so keep them in sync if you touch one:
 3. **Frontend** (`App.jsx`): `fetchJobs` filters to `isWithin24h(job)` — trusts the
    backend flag first, with a free-text `date_posted` fallback.
 
-## Custom MCP tools (`backend/mcp_server.py`, FastMCP)
+## Web tooling (built-in, no MCP)
 
-- `web_search(query)` — DuckDuckGo text search, returns the top 8 results
-  (title/URL/snippet).
-- `fetch_webpage_content(url)` — fetches a page, strips boilerplate with BeautifulSoup,
-  returns cleaned text capped at 4000 chars.
+The agent uses Claude's built-in web tools directly — no MCP servers are configured.
+
+- `WebSearch` — targeted web queries (e.g. `C2C Data Engineer site:linkedin.com`) with each
+  board's last-24h recency filter.
+- `WebFetch` — opens and reads individual listings to verify dates and extract fields.
 
 ## Persistence (`backend/db.py`, SQLite `jobs.db`)
 
@@ -117,9 +116,10 @@ shown. This is enforced at every layer, so keep them in sync if you touch one:
 `backend/agent.py` declares `AGENT_ALLOWED_TOOLS` and passes it to
 `ClaudeAgentOptions(allowed_tools=...)`. It grants the full built-in toolset from the
 [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) — `Read`,
-`Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite` —
-plus the project MCP tools (`mcp__job_finder_tools__*`, `mcp__puppeteer`). The `job_scout`
-subagent keeps its narrower MCP-only toolset.
+`Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite`.
+There is **no MCP integration**; the agent relies solely on the built-in `WebSearch` and
+`WebFetch` web tools. The `job_scout` subagent keeps its narrower toolset (`WebSearch`,
+`WebFetch`).
 
 ## Authentication (`backend/auth.py`)
 

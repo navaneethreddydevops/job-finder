@@ -32,10 +32,9 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 * **max_turns**: `80` (multi-agent fan-out needs headroom).
 * **permission_mode**: `bypassPermissions`.
 * **allowed_tools**: `AGENT_ALLOWED_TOOLS` grants the full built-in toolset (`Read`, `Write`,
-  `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite`) plus the
-  project MCP tools (`mcp__job_finder_tools__*`, `mcp__puppeteer`).
+  `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite`). The agent
+  relies solely on Claude's built-in web tooling — there is **no MCP integration**.
 * **agents**: registers a `job_scout` subagent, which enables the built-in **Task** tool.
-* **mcp_servers**: `puppeteer` (headless browser) and `job_finder_tools` (custom search).
 * **output_format**: `JobList.model_json_schema()` for guaranteed structured output.
 
 ### Orchestrator + subagent design
@@ -44,8 +43,8 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
   LinkedIn, Dice, Monster, Indeed, and ZipRecruiter — running them in parallel, then
   merges and de-duplicates the combined results.
 * Each **`job_scout`** is given one source, the query, and the run date, and returns a
-  JSON array of jobs for that source. Scouts share the `job_finder_tools` and `puppeteer`
-  MCP servers (`model="inherit"`).
+  JSON array of jobs for that source. Scouts use Claude's built-in `WebSearch` and
+  `WebFetch` tools (`model="inherit"`).
 
 ### Goals & constraints
 
@@ -59,19 +58,17 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
 ---
 
-## Custom Tools (`backend/mcp_server.py`, FastMCP server `job_finder_tools`)
+## Web tooling (built-in)
 
-### 1. `web_search(query: str)`
-* **Purpose**: DuckDuckGo text search.
-* **Output**: Title, URL, and snippet for the top 8 results.
+The agent uses Claude's built-in web tools directly — no MCP servers are configured.
 
-### 2. `fetch_webpage_content(url: str)`
-* **Purpose**: Scrape a target page, strip boilerplate (scripts, styles, header, footer,
-  nav) with BeautifulSoup, and return cleaned text.
-* **Output**: Cleaned page text, capped at 4000 characters to avoid context bloat.
+### 1. `WebSearch`
+* **Purpose**: Run targeted web queries (e.g. `C2C Data Engineer site:linkedin.com`) with
+  each board's last-24h recency filter.
 
-The `puppeteer` MCP server (`@modelcontextprotocol/server-puppeteer`) provides headless
-browser navigation for sites that block simple fetches.
+### 2. `WebFetch`
+* **Purpose**: Open and read individual job listings to verify posting dates and extract
+  structured fields.
 
 ---
 

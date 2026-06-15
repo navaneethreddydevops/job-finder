@@ -15,12 +15,6 @@
       "runtimeArgs": ["run", "uvicorn", "backend.main:app", "--reload", "--port", "8000"],
       "port": 8000,
       "autoPort": false
-    },
-    {
-      "name": "MCP Server",
-      "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "python", "backend/mcp_server.py"],
-      "port": null
     }
   ]
 }

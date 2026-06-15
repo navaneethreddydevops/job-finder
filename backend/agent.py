@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 from claude_agent_sdk.types import (
-    McpStdioServerConfig,
     AgentDefinition,
     ToolUseBlock,
     ThinkingBlock,
@@ -27,8 +26,9 @@ os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 
 # Full built-in toolset granted to the orchestrator (see the Claude Agent SDK overview:
-# https://code.claude.com/docs/en/agent-sdk/overview) plus the project's MCP tools. This
-# makes the agent's capabilities explicit rather than relying on bypassPermissions alone.
+# https://code.claude.com/docs/en/agent-sdk/overview). The agent relies solely on Claude's
+# built-in web tooling (WebSearch + WebFetch) — there is no MCP integration. Granting tools
+# explicitly makes the agent's capabilities clear rather than relying on bypassPermissions alone.
 AGENT_ALLOWED_TOOLS = [
     # Built-in tools
     "Read",
@@ -41,10 +41,6 @@ AGENT_ALLOWED_TOOLS = [
     "WebFetch",
     "Task",  # spawns the job_scout subagent (fan-out)
     "TodoWrite",
-    # Project MCP tools
-    "mcp__job_finder_tools__web_search",
-    "mcp__job_finder_tools__fetch_webpage_content",
-    "mcp__puppeteer",  # headless browser server (all tools)
 ]
 
 
@@ -106,22 +102,6 @@ async def run_job_finder_agent(
     if log_callback:
         await log_callback(f"[Agent] Starting Job Search for query: '{query}'...\n")
 
-    # MCP Server configuration
-    mcp_servers = {
-        "puppeteer": McpStdioServerConfig(
-            command="npx",
-            args=["-y", "@modelcontextprotocol/server-puppeteer"],
-        ),
-        "job_finder_tools": McpStdioServerConfig(
-            command="uv",
-            args=[
-                "run",
-                "python",
-                os.path.join(os.path.dirname(__file__), "mcp_server.py"),
-            ],
-        ),
-    }
-
     # Subagent used to parallelize the search across job boards. The orchestrator
     # spawns one `job_scout` per source (LinkedIn, Dice, Monster, Indeed, ...) via the
     # built-in Task tool so coverage scales out instead of being done serially.
@@ -137,9 +117,9 @@ async def run_job_finder_agent(
             "ONLY ones posted within the LAST 24 HOURS (i.e. today / on the run date). Discard anything older. "
             "Use each site's recency filter to enforce this — e.g. LinkedIn `f_TPR=r86400`, Indeed `fromage=1`, "
             "Dice/Monster 'posted today / last 24 hours'. "
-            "Use the `web_search` tool (via the job_finder_tools MCP server) for quick lookups with targeted "
-            "queries like 'C2C Data Engineer site:<source>', and use `fetch_webpage_content` or the puppeteer "
-            "browser tools to open and read listings or bypass blocks. Verify each posting's date before keeping it. "
+            "Use the built-in `WebSearch` tool for quick lookups with targeted queries like "
+            "'C2C Data Engineer site:<source>', and use `WebFetch` to open and read individual listings. "
+            "Verify each posting's date before keeping it. "
             "For each job extract: title, company, location, url, date_posted (e.g. '3 hours ago', 'today'), "
             "posted_within_24h (true only when genuinely posted in the last 24 hours), c2c_viability "
             "('Confirmed C2C', 'Likely C2C', or 'Not Specified'), key_requirements (list), contact_email, "
@@ -147,7 +127,7 @@ async def run_job_finder_agent(
             "Return ONLY a JSON array of job objects — no commentary."
         ),
         model="inherit",
-        mcpServers=["job_finder_tools", "puppeteer"],
+        tools=["WebSearch", "WebFetch"],
     )
 
     # Agent config
@@ -158,7 +138,6 @@ async def run_job_finder_agent(
         session_id=effective_session_id if not is_resume else None,
         resume=effective_session_id if is_resume else None,
         model=None,
-        mcp_servers=mcp_servers,
         agents={"job_scout": job_scout},
         allowed_tools=AGENT_ALLOWED_TOOLS,
         max_turns=80,
@@ -168,9 +147,8 @@ async def run_job_finder_agent(
             "You are a professional Job Finder orchestrator specializing in finding C2C (Corp-to-Corp) "
             "Data Engineer roles. Your goal is to compile AS MANY matching, recently-posted jobs as possible — "
             "there is no upper limit; more is better. "
-            "You have a `job_scout` subagent (invoke it with the Task tool) plus custom search tools via the "
-            "`job_finder_tools` MCP server (`web_search`, `fetch_webpage_content`) and a headless browser via the "
-            "`puppeteer` MCP server. "
+            "You have a `job_scout` subagent (invoke it with the Task tool) plus Claude's built-in web tools "
+            "(`WebSearch` for queries and `WebFetch` for reading individual listings). "
             "STRATEGY: Delegate breadth to subagents. Spawn one `job_scout` per source — at minimum LinkedIn, Dice, "
             "Monster, Indeed, and ZipRecruiter — running them in parallel (issue multiple Task calls together) so the "
             "search fans out. Each scout returns a JSON array of jobs for its source. You may spawn additional scouts "

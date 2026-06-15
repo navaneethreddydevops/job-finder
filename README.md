@@ -8,7 +8,7 @@ A full-stack, Claude-powered dashboard that scours web portals for Corp-to-Corp 
 * **Multi-agent Job Finder**: An orchestrator fans the search out to parallel `job_scout` subagents (via the Task tool), one per source (LinkedIn, Dice, Monster, Indeed, ZipRecruiter), then merges and de-duplicates the results.
 * **Fresh-only results**: Collects and displays **only jobs posted within the last 24 hours** (today / the run date).
 * **No volume cap**: Pulls as many matching C2C roles as it can find.
-* **Custom tools + headless browser**: DuckDuckGo `web_search` and a BeautifulSoup `fetch_webpage_content` tool (the `job_finder_tools` MCP server), plus a Puppeteer MCP browser for blocked sites.
+* **Built-in web tooling**: Scouts search and read job boards using Claude's built-in `WebSearch` and `WebFetch` tools — no MCP servers required.
 * **Live thought console**: Streams agent reasoning and tool calls to the browser over Server-Sent Events.
 * **Sleek React Dashboard**: A dark-mode, glassmorphism web UI with statistics, search, multi-selection filters (C2C viability, Remote vs Onsite, Job Sources, Applied), and a details drawer.
 * **Authentication**: Email/password login & registration (8+ char passwords), profile editing, and password change. Seeded test user `test@test.com` / `testtest`.
@@ -26,7 +26,6 @@ job-finder/
 │   ├── resume.py          # Resume optimizer: docx parse/generate + Claude call
 │   ├── main.py            # FastAPI server (REST + SSE), wires auth + resume routers
 │   ├── db.py              # SQLite persistence + de-duplication
-│   ├── mcp_server.py      # FastMCP server: web_search + fetch_webpage_content
 │   └── jobs.db            # SQLite database (jobs, users, resume_jobs)
 ├── frontend/              # Vite React Project
 │   ├── src/
