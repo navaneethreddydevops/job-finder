@@ -222,4 +222,4 @@ __marimo__/
 .playwright-mcp/
 
 # Claude Code local config
-.claude/
+.firecrawl/*
