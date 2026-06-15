@@ -105,7 +105,10 @@ The agent uses Claude's built-in web tools directly — no MCP servers are confi
 ## Backend API (`backend/main.py`)
 
 - `POST /api/pull` `{query}` — starts the agent as a background task (rejects if already
-  running).
+  running). Jobs are persisted **incrementally in small batches as each `job_scout`
+  finishes** (via `run_job_finder_agent`'s `batch_callback`), so the dashboard fills in
+  progressively without waiting for the whole run; the agent's final merged list is saved
+  at the end as a de-duplicating reconciliation pass. See `app_spec.md` Task 5.
 - `GET /api/jobs` — all stored jobs.
 - `GET /api/stream` — SSE stream of agent thoughts/tool calls/backend logs. On a DB
   write the backend emits a `Database now holds …` line that the UI uses to refresh.

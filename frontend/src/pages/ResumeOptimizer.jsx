@@ -5,6 +5,7 @@ import {
   ArrowLeft, Upload, Sparkles, Download, FileText, Plus, Trash2, Save, Eye, Pencil,
 } from 'lucide-react';
 import { apiFetch } from '../auth.jsx';
+import UserMenu from '../components/UserMenu.jsx';
 
 const STATE_KEY = 'jf_resume_state';
 
@@ -213,7 +214,9 @@ export default function ResumeOptimizer() {
           <FileText className="logo-icon" size={24} />
           <span className="logo-text">Resume Optimizer</span>
         </div>
-        <div />
+        <div className="header-actions" style={{ marginLeft: 'auto' }}>
+          <UserMenu />
+        </div>
       </header>
 
       {/* Top chat window: job description + optimize */}

@@ -63,6 +63,26 @@ async def run_agent_task(query: str):
         async def log_callback(thought: str):
             await publish_log(thought)
 
+        async def batch_callback(jobs_batch):
+            """Persist a scout's batch of jobs the moment it finishes, so the UI fills
+            in incrementally instead of waiting for the whole agent run to complete."""
+            inserted = 0
+            for job in jobs_batch:
+                job_dict = (
+                    job.model_dump()
+                    if hasattr(job, "model_dump")
+                    else (job.dict() if hasattr(job, "dict") else dict(job))
+                )
+                try:
+                    if save_job(job_dict):
+                        inserted += 1
+                except Exception:
+                    pass
+            await publish_log(
+                f"\n[Backend] Saved a batch of {len(jobs_batch)} jobs "
+                f"({inserted} new). Database now holds {len(get_all_jobs())} total jobs.\n"
+            )
+
         # Initialize a new session ID every time to prevent corrupted resume states
         is_resume = False
         agent_status["session_id"] = str(uuid.uuid4())
@@ -73,6 +93,7 @@ async def run_agent_task(query: str):
             log_callback=log_callback,
             session_id=agent_status["session_id"],
             is_resume=is_resume,
+            batch_callback=batch_callback,
         )
 
         if results is None:
@@ -99,8 +120,8 @@ async def run_agent_task(query: str):
 
             updated_count = len(jobs_list) - inserted_count
             await publish_log(
-                f"\n[Backend] Agent returned {len(jobs_list)} jobs — "
-                f"{inserted_count} new, {updated_count} updated/duplicate. Database now holds "
+                f"\n[Backend] Reconciliation: agent's final merged list had {len(jobs_list)} jobs — "
+                f"{inserted_count} new, {updated_count} already saved from a batch. Database now holds "
                 f"{len(get_all_jobs())} total jobs.\n"
             )
     except Exception as e:

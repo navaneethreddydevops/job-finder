@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeft, Save, KeyRound, User } from 'lucide-react';
 import { useAuth, apiFetch } from '../auth.jsx';
+import UserMenu from '../components/UserMenu.jsx';
 
 export default function Profile() {
   const { user, updateUser } = useAuth();
@@ -58,6 +59,9 @@ export default function Profile() {
       <header className="app-header">
         <Link to="/" className="btn"><ArrowLeft size={16} /> Back to Dashboard</Link>
         <span className="logo-text" style={{ fontSize: '1.1rem' }}>Account Settings</span>
+        <div className="header-actions" style={{ marginLeft: 'auto' }}>
+          <UserMenu />
+        </div>
       </header>
 
       <div className="profile-grid">

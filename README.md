@@ -8,6 +8,7 @@ A full-stack, Claude-powered dashboard that scours web portals for Corp-to-Corp 
 * **Multi-agent Job Finder**: An orchestrator fans the search out to parallel `job_scout` subagents (via the Task tool), one per source (LinkedIn, Dice, Monster, Indeed, ZipRecruiter), then merges and de-duplicates the results.
 * **Fresh-only results**: Collects and displays **only jobs posted within the last 24 hours** (today / the run date).
 * **No volume cap**: Pulls as many matching C2C roles as it can find.
+* **Incremental saving**: Jobs are written to the database in small batches as each scout finishes, so the dashboard fills in progressively instead of waiting for the whole run to complete.
 * **Built-in web tooling**: Scouts search and read job boards using Claude's built-in `WebSearch` and `WebFetch` tools — no MCP servers required.
 * **Live thought console**: Streams agent reasoning and tool calls to the browser over Server-Sent Events.
 * **Notion-inspired React Dashboard**: A clean, editorial light UI (serif display headings, hairline borders, soft shadows, Notion-style tag colors) with statistics, search, multi-selection filters (C2C viability, Remote vs Onsite, Job Sources, Applied), and a details drawer. See the redesign spec in [app_spec.md](app_spec.md) (Task 4).

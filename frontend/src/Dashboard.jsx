@@ -15,14 +15,11 @@ import {
   Layers,
   CheckCircle2,
   Cpu,
-  FileText,
-  User,
-  LogOut
+  FileText
 } from 'lucide-react';
-import { useAuth } from './auth.jsx';
+import UserMenu from './components/UserMenu.jsx';
 
 function Dashboard() {
-  const { user, logout } = useAuth();
   const [jobs, setJobs] = useState([]);
   const [status, setStatus] = useState({ status: 'idle', query: null });
   const [query, setQuery] = useState('Senior Data Engineer');
@@ -626,14 +623,6 @@ function Dashboard() {
             <FileText size={16} />
             Resume Optimizer
           </Link>
-          <Link to="/profile" className="btn" title="Account & Profile">
-            <User size={16} />
-            {user?.full_name || user?.email || 'Profile'}
-          </Link>
-          <button className="btn" onClick={logout} title="Log out">
-            <LogOut size={16} />
-            Logout
-          </button>
           <button
             id="sync-db-btn"
             className={`btn ${status.status === 'running' ? 'disabled' : ''}`}
@@ -646,7 +635,7 @@ function Dashboard() {
           </button>
 
           {/* Backend Health Badge */}
-          <div className="logo-badge" style={{ 
+          <div className="logo-badge" style={{
             background: healthStatus === 'ok' ? 'rgba(16, 185, 129, 0.2)' : healthStatus === 'error' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(107, 114, 128, 0.2)',
             color: healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--text-muted)',
             display: 'flex', alignItems: 'center', gap: '0.4rem', border: `1px solid ${healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--border)'}`
@@ -654,6 +643,8 @@ function Dashboard() {
             <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--text-muted)' }}></div>
             <span>Backend: {healthStatus === 'ok' ? 'Online' : healthStatus === 'error' ? 'Offline' : 'Checking...'}</span>
           </div>
+
+          <UserMenu />
         </div>
       </header>
 

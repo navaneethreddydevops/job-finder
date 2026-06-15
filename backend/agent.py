@@ -8,9 +8,11 @@ from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 from claude_agent_sdk.types import (
     AgentDefinition,
     ToolUseBlock,
+    ToolResultBlock,
     ThinkingBlock,
     TextBlock,
     AssistantMessage,
+    UserMessage,
     ResultMessage,
 )
 
@@ -82,9 +84,77 @@ class JobList(BaseModel):
     jobs: list[JobItem] = Field(description="List of jobs found")
 
 
+def _tool_result_text(content) -> str:
+    """Flatten a ToolResultBlock's content (str | list of content dicts) to text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(item.get("text") or item.get("content") or "")
+            else:
+                parts.append(str(item))
+        return "\n".join(p for p in parts if p)
+    return str(content)
+
+
+def _extract_jobs_from_text(text: str) -> list[dict]:
+    """Best-effort parse of a scout's returned payload into a list of job dicts.
+
+    A `job_scout` returns "ONLY a JSON array of job objects". We tolerate the array
+    being wrapped in a ```json fence, surrounded by stray prose, or wrapped in a
+    {"jobs": [...]} object. Returns [] on anything we can't parse — batching is
+    best-effort and the end-of-run reconciliation pass is the safety net.
+    """
+    if not text:
+        return []
+
+    candidates: list[str] = []
+    fenced = re.findall(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
+    candidates.extend(fenced)
+    candidates.append(text)
+
+    for chunk in candidates:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        # Try the whole chunk, then the widest array/object substring within it.
+        sub_candidates = [chunk]
+        arr = re.search(r"\[.*\]", chunk, re.DOTALL)
+        if arr:
+            sub_candidates.append(arr.group(0))
+        obj = re.search(r"\{.*\}", chunk, re.DOTALL)
+        if obj:
+            sub_candidates.append(obj.group(0))
+
+        for sub in sub_candidates:
+            try:
+                parsed = json.loads(sub)
+            except Exception:
+                continue
+            if isinstance(parsed, dict) and isinstance(parsed.get("jobs"), list):
+                parsed = parsed["jobs"]
+            if isinstance(parsed, list):
+                jobs = [
+                    j
+                    for j in parsed
+                    if isinstance(j, dict) and (j.get("title") or j.get("company"))
+                ]
+                if jobs:
+                    return jobs
+    return []
+
+
 # Running the Agent with real-time thought logs
 async def run_job_finder_agent(
-    query: str, log_callback=None, session_id=None, is_resume=False
+    query: str,
+    log_callback=None,
+    session_id=None,
+    is_resume=False,
+    batch_callback=None,
 ):
     """Initializes and executes the job finder agent using the claude-agent-sdk.
 
@@ -93,6 +163,9 @@ async def run_job_finder_agent(
         log_callback: Async function to stream thoughts/logs to (receives strings)
         session_id: A valid UUID string.
         is_resume: Whether the session_id is for an existing session to resume.
+        batch_callback: Optional async function called with a list of job dicts each
+            time a `job_scout` subagent finishes, so results can be persisted in small
+            batches as they are found instead of waiting for the whole run to complete.
     """
 
     from datetime import datetime, timezone
@@ -193,21 +266,48 @@ async def run_job_finder_agent(
         await client.query(prompt, session_id=effective_session_id)
 
         data = None
+        # Track the tool_use_id of each `Task` (job_scout) call so we can recognise its
+        # result when it streams back and persist that scout's jobs immediately.
+        scout_task_ids: set[str] = set()
         # Process the response stream manually to extract tool execution logs and thinking
         async for msg in client.receive_response():
-            if log_callback:
-                # If it's an assistant message, we can get thought process and tool execution
-                if isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, ThinkingBlock):
-                            # Emit thought
+            # If it's an assistant message, we can get thought process and tool execution
+            if isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if isinstance(block, ThinkingBlock):
+                        if log_callback:
                             await log_callback(block.thinking)
-                        elif isinstance(block, ToolUseBlock):
-                            # Emit tool use
+                    elif isinstance(block, ToolUseBlock):
+                        if block.name == "Task":
+                            scout_task_ids.add(block.id)
+                        if log_callback:
                             tool_msg = f"\n[Tool Call] Running tool '{block.name}' with arguments: {block.input}\n"
                             await log_callback(tool_msg)
-                        elif isinstance(block, TextBlock):
+                    elif isinstance(block, TextBlock):
+                        if log_callback:
                             await log_callback(block.text)
+
+            # A `Task` (job_scout) result streams back as a UserMessage containing a
+            # ToolResultBlock. Parse the scout's JSON array and persist it as a batch
+            # right away, before the orchestrator merges everything or the run ends.
+            elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
+                for block in msg.content:
+                    if (
+                        isinstance(block, ToolResultBlock)
+                        and block.tool_use_id in scout_task_ids
+                        and not block.is_error
+                    ):
+                        batch = _extract_jobs_from_text(
+                            _tool_result_text(block.content)
+                        )
+                        if batch and batch_callback:
+                            try:
+                                await batch_callback(batch)
+                            except Exception as e:
+                                if log_callback:
+                                    await log_callback(
+                                        f"\n[Agent] Batch save failed: {e}\n"
+                                    )
 
             # When the generator completes the task, it outputs a ResultMessage
             if isinstance(msg, ResultMessage):

@@ -207,11 +207,50 @@ standard while changing **no behavior, routes, data flow, WebMCP tooling, or API
 7. **Auth / Profile / Resume Optimizer.** These reuse the shared classes
    (`auth-card`, `sidebar-panel`, `input-text`, `resume-*`, `docx-host`), so they inherit the
    new look; only verify contrast and the docx "paper" preview still reads correctly.
+
+   **Account menu.** Account access is consolidated into a single **rightmost user tab**
+   (`UserMenu`, `frontend/src/components/UserMenu.jsx`) rendered on every authenticated header
+   (Dashboard, Profile, Resume Optimizer). The tab shows an avatar initial + name and opens a
+   dropdown containing **Account & Profile** (→ `/profile`) and **Log out**. The dropdown
+   closes on outside click or `Escape`. The separate header "Profile" link and "Logout" button
+   were removed. Stable `id`s: `user-menu`, `user-menu-trigger`, `user-menu-dropdown`,
+   `user-menu-profile`, `user-menu-logout`.
 8. **Verify.** Build the frontend (`npm run build`) and load via the preview workflow; confirm
    each route renders, the agent console + modal look correct, and no regression in behavior.
 
 Scope guardrail: this task is **CSS + fonts only**. Class names, element structure, `id`s
 (used by WebMCP/agent tooling), state, and endpoints are unchanged.
+
+---
+
+## Task 5 — Incremental batch persistence (stream jobs to the DB as scouts finish)
+
+When **Trigger Agent Run** is clicked the agent searches for jobs posted within the
+**last 24 hours** (unchanged). The new requirement: results must be persisted to the
+database in **small batches as they are found**, rather than waiting for the entire
+agent run to finish before a single bulk save at the end.
+
+### How it works
+- The orchestrator fans out to one `job_scout` subagent per source via the `Task`
+  tool. Each scout returns a JSON array of jobs for **its** source — that array is a
+  natural batch.
+- `run_job_finder_agent()` accepts a `batch_callback(jobs: list[dict])`. While streaming
+  the agent response it tracks every `Task` tool-use id, and when the matching
+  `ToolResultBlock` (the scout's returned JSON array) arrives it parses the jobs and
+  invokes `batch_callback` **immediately** — so each scout's batch is saved the moment
+  that scout finishes, before the orchestrator has merged everything or the run is done.
+- `main.py`'s `run_agent_task` passes a `batch_callback` that saves each batch with
+  `save_job` (URL-keyed de-dup makes it idempotent) and emits a
+  `Database now holds … total jobs` log line, which the UI already uses to refresh.
+- The final structured-output list is still saved at the end as a **reconciliation /
+  safety net** — `save_job` de-dups, so jobs already persisted from a batch are just
+  updated, not duplicated.
+
+### Notes
+- Only jobs flagged/derivable as posted within 24h are kept (unchanged enforcement at
+  agent + DB + frontend layers).
+- Batches are best-effort: a malformed scout payload is skipped without failing the run;
+  the end-of-run reconciliation pass still captures the merged list.
 
 ---
 

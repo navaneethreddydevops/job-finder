@@ -85,6 +85,17 @@ SDK response stream and forwards blocks to a `log_callback`:
 written to the database it emits a `Database now holds …` line, which the frontend uses to
 refresh the dashboard immediately.
 
+## Incremental Batch Persistence
+
+Results are saved to the database **in small batches as scouts finish**, not in one bulk
+write at the end. `run_job_finder_agent` accepts a `batch_callback`; while streaming it
+tracks each `Task` (job_scout) tool-use id and, when that scout's `ToolResultBlock`
+(its JSON array of jobs) streams back, parses the jobs and invokes `batch_callback`
+immediately. `main.py`'s callback persists the batch with `save_job` (URL-keyed dedup →
+idempotent) and emits a `Database now holds …` line, so the dashboard fills in
+progressively. The final structured-output list is still saved at the end as a
+de-duplicating reconciliation pass. See `app_spec.md` Task 5.
+
 ---
 
 ## Response Schema (Structured Output)
