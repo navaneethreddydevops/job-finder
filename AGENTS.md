@@ -1,64 +1,116 @@
-# C2C Job Finder Agent Documentation
+# C2C Job Finder — Agent Documentation
 
-This file documents the design, capabilities, and configurations of the AI Job Finder Agent developed using the **Google Antigravity SDK**.
+This documents the design, configuration, and tools of the AI Job Finder Agent built on
+the **Claude Agent SDK** (`claude-agent-sdk`). The implementation lives in
+`backend/agent.py`.
 
 ## Overview
 
-The Job Finder Agent is a specialized autonomous assistant that scours web portals for Corp-to-Corp (C2C) Data Engineer positions. It is designed to run asynchronously, utilize tools to perform searches and extract raw page data, evaluate findings against C2C criteria, and return structured JSON.
+The Job Finder is a specialized autonomous agent that scours job boards for
+**Corp-to-Corp (C2C) Data Engineer** positions **posted within the last 24 hours**. It
+runs asynchronously as a FastAPI background task, delegates breadth to parallel
+subagents, evaluates findings against C2C criteria and freshness, and returns structured
+JSON that is persisted to SQLite.
+
+---
+
+## Authentication — OAuth only
+
+The backend authenticates to Claude **exclusively via the stored Claude OAuth
+credentials** (`~/.claude`) used by the `claude` CLI. It **never** uses an Anthropic API
+key. `agent.py` drops `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the environment
+at import time so the SDK-spawned CLI uses its own OAuth login. No API key is required to
+run this project.
 
 ---
 
 ## Agent Configuration
 
-The agent is instantiated locally using `LocalAgentConfig` with the following parameters:
+The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
-* **Model**: Defaults to `claude-3-5-sonnet-latest` (provided by the Claude Agent SDK).
-* **System Instructions**:
-  > "You are a professional Job Finder agent specializing in finding C2C (Corp-to-Corp) Data Engineer roles. You must use the `web_search` tool to search for jobs specifically on LinkedIn, Monster, and Dice. Analyze search results, fetch specific details using `fetch_webpage_content` where necessary, and extract structured jobs. Only return jobs that are recently posted and match the C2C criteria or where C2C/Corp-to-Corp is explicitly mentioned or very likely. Highlight the C2C viability in the structured response. The goal is to pull as many relevant jobs as possible (aiming for at least 20-30)."
+* **Model**: `model=None` — inherits whatever model the `claude` CLI is logged in with.
+* **max_turns**: `80` (multi-agent fan-out needs headroom).
+* **permission_mode**: `bypassPermissions`.
+* **agents**: registers a `job_scout` subagent, which enables the built-in **Task** tool.
+* **mcp_servers**: `puppeteer` (headless browser) and `job_finder_tools` (custom search).
+* **output_format**: `JobList.model_json_schema()` for guaranteed structured output.
+
+### Orchestrator + subagent design
+
+* The **orchestrator** spawns one `job_scout` per source via the Task tool — at minimum
+  LinkedIn, Dice, Monster, Indeed, and ZipRecruiter — running them in parallel, then
+  merges and de-duplicates the combined results.
+* Each **`job_scout`** is given one source, the query, and the run date, and returns a
+  JSON array of jobs for that source. Scouts share the `job_finder_tools` and `puppeteer`
+  MCP servers (`model="inherit"`).
+
+### Goals & constraints
+
+* **Volume**: pull **as many** matching jobs as possible — there is no upper limit (the
+  previous "aim for 20–30" cap was removed).
+* **Freshness**: include **only** jobs posted within the **last 24 hours** (today / the
+  run date). Scouts use each board's last-24h recency filter (e.g. LinkedIn
+  `f_TPR=r86400`, Indeed `fromage=1`) and set `posted_within_24h` on every job.
+* **C2C**: keep roles where C2C / Corp-to-Corp is explicitly mentioned or very likely;
+  drop strictly-W2 roles.
 
 ---
 
-## Capabilities & Custom Tools
+## Custom Tools (`backend/mcp_server.py`, FastMCP server `job_finder_tools`)
 
-The agent is equipped with two custom Python functions registered as tools:
+### 1. `web_search(query: str)`
+* **Purpose**: DuckDuckGo text search.
+* **Output**: Title, URL, and snippet for the top 8 results.
 
-### 1. Web Search (`web_search`)
-* **Purpose**: Query DuckDuckGo for search results.
-* **Arguments**: `query: str`
-* **Output**: Formatted titles, links, and snippet descriptions of the top 8 search hits.
+### 2. `fetch_webpage_content(url: str)`
+* **Purpose**: Scrape a target page, strip boilerplate (scripts, styles, header, footer,
+  nav) with BeautifulSoup, and return cleaned text.
+* **Output**: Cleaned page text, capped at 4000 characters to avoid context bloat.
 
-### 2. Fetch Webpage Content (`fetch_webpage_content`)
-* **Purpose**: Scrapes a specific target page URL, extracts visual text, strips unnecessary HTML boilerplate (scripts, headers, footers), and returns clean description content (capped at 4000 characters to prevent token overflow).
-* **Arguments**: `url: str`
-* **Output**: Cleaned raw text representation of the webpage.
+The `puppeteer` MCP server (`@modelcontextprotocol/server-puppeteer`) provides headless
+browser navigation for sites that block simple fetches.
 
 ---
 
-## Lifecycle Event Hooks
+## Live Thought Streaming
 
-To enable the live thought terminal inside the React UI, the agent registers two event hooks to capture execution stages:
+The agent's reasoning is surfaced to the React UI in real time. `agent.py` iterates the
+SDK response stream and forwards blocks to a `log_callback`:
 
-* **Pre-Tool Call Hook (`pre_tool_hook`)**: Intercepts tool execution to log what tool is about to run and with what arguments.
-* **Post-Tool Call Hook (`post_tool_hook`)**: Signals the client that tool execution has finished successfully.
-* **Thought Stream Generator**: The server loops over `response.thoughts` to stream the agent's internal reasoning chunks directly to the UI through Server-Sent Events (SSE).
+* **ThinkingBlock** → streamed as the agent's internal reasoning.
+* **ToolUseBlock** → streamed as `[Tool Call] …` with the tool name and arguments.
+* **TextBlock** → streamed as assistant text.
+
+`main.py` publishes these over **Server-Sent Events** (`GET /api/stream`). When jobs are
+written to the database it emits a `Database now holds …` line, which the frontend uses to
+refresh the dashboard immediately.
 
 ---
 
 ## Response Schema (Structured Output)
 
-The agent is configured with `response_schema=JobList`, guaranteeing the response matches a strict JSON format matching the following Pydantic model:
+The agent is configured with `output_format=JobList.model_json_schema()`, guaranteeing the
+response matches this Pydantic model (`backend/agent.py`):
 
 ```python
 class JobItem(BaseModel):
     title: str               # The job title
     company: str             # The company name
-    location: str            # Remote, City, State, or Hybrid
+    location: str            # Remote, City/State, or Hybrid
     url: str                 # The direct posting URL
-    date_posted: str         # Found or posted timeline
+    date_posted: str         # e.g. "2 hours ago", "today", "June 12"
+    posted_within_24h: bool  # True only if posted within the last 24 hours / run date
     c2c_viability: str       # Confirmed C2C, Likely C2C, or Not Specified
     key_requirements: list   # List of technical skills
-    contact_email: str       # Recruiter email (if found)
-    contact_phone: str       # Recruiter phone (if found)
+    contact_email: str | None
+    contact_phone: str | None
     source: str              # Portal source (e.g. LinkedIn, Dice)
-    description: str         # C2C terms summary & description
+    description: str          # C2C terms summary & description
+
+class JobList(BaseModel):
+    jobs: list[JobItem]
 ```
+
+Results are persisted to SQLite (`backend/db.py`), de-duplicated by URL (or by
+`title|company|location` when the URL is missing), preserving each job's `applied` status
+across re-runs.

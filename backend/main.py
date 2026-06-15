@@ -49,11 +49,9 @@ async def run_agent_task(query: str):
         async def log_callback(thought: str):
             await publish_log(thought)
         
-        # Initialize a new session ID if one doesn't exist
-        is_resume = True
-        if not agent_status.get("session_id"):
-            agent_status["session_id"] = str(uuid.uuid4())
-            is_resume = False
+        # Initialize a new session ID every time to prevent corrupted resume states
+        is_resume = False
+        agent_status["session_id"] = str(uuid.uuid4())
             
         # Pass the tracked session_id
         results = await run_job_finder_agent(
@@ -64,7 +62,7 @@ async def run_agent_task(query: str):
         )
         
         if results is None:
-            await publish_log("\n[Backend] Agent returned no results. This may indicate an API key issue or agent error.\n")
+            await publish_log("\n[Backend] Agent returned no results. This may indicate a Claude OAuth login issue or agent error.\n")
         else:
             # Save results to local SQLite database
             jobs_list = []
@@ -73,11 +71,18 @@ async def run_agent_task(query: str):
             elif isinstance(results, dict) and "jobs" in results:
                 jobs_list = results["jobs"]
             
+            inserted_count = 0
             for job in jobs_list:
                 job_dict = job.model_dump() if hasattr(job, "model_dump") else (job.dict() if hasattr(job, "dict") else dict(job))
-                save_job(job_dict)
-                
-            await publish_log(f"\n[Backend] {len(jobs_list)} jobs saved to the SQLite database!\n")
+                if save_job(job_dict):
+                    inserted_count += 1
+
+            updated_count = len(jobs_list) - inserted_count
+            await publish_log(
+                f"\n[Backend] Agent returned {len(jobs_list)} jobs — "
+                f"{inserted_count} new, {updated_count} updated/duplicate. Database now holds "
+                f"{len(get_all_jobs())} total jobs.\n"
+            )
     except Exception as e:
         await publish_log(f"\n[Backend Error] Agent failed: {e}\n")
     finally:
