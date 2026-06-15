@@ -408,6 +408,17 @@ body {
   box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6);
 }
 
+.btn-success-active {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(16, 185, 129, 0.1));
+  border-color: rgba(16, 185, 129, 0.4);
+  color: var(--success);
+}
+
+.btn-success-active:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.3), rgba(16, 185, 129, 0.15));
+  border-color: rgba(16, 185, 129, 0.6);
+}
+
 /* Agent Console/Logger Panel */
 .agent-console-panel {
   background-color: rgba(3, 4, 6, 0.8);
@@ -557,6 +568,15 @@ body {
 
 .job-card {
   animation: slide-fade-in 0.5s ease-out forwards;
+}
+
+.job-card.applied {
+  border-color: rgba(16, 185, 129, 0.3);
+  box-shadow: var(--shadow-md), inset 0 0 0 1px rgba(16, 185, 129, 0.08);
+}
+
+.job-card.applied:hover {
+  border-color: rgba(16, 185, 129, 0.5);
 }
 
 .job-card-header {

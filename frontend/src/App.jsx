@@ -842,7 +842,7 @@ function App() {
                   const absoluteIdx = (currentPage - 1) * JOBS_PER_PAGE + localIdx;
                   return (
                   <div 
-                    key={absoluteIdx} 
+                    key={job.id || absoluteIdx} 
                     id={`job-card-${absoluteIdx}`}
                     className={`job-card ${job.applied ? 'applied' : ''}`}
                     onClick={() => setSelectedJob(job)}

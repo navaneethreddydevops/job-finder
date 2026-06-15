@@ -1,6 +1,6 @@
 # AI C2C Job Finder Application
 
-A full-stack, Gemini-powered dashboard that scours web portals for Corp-to-Corp (C2C) Data Engineer roles. It features an autonomous agent using the **Google Antigravity SDK**, a **FastAPI backend**, and a premium **React UI** complete with a real-time console thought-logger.
+A full-stack, Claude-powered dashboard that scours web portals for Corp-to-Corp (C2C) Data Engineer roles. It features an autonomous agent using the **Claude Agent SDK**, a **FastAPI backend**, and a premium **React UI** complete with a real-time console thought-logger.
 
 ---
 
@@ -38,11 +38,11 @@ Copy [.env.example](file:///.env.example) to `.env` in the root:
 ```bash
 cp .env.example .env
 ```
-Open `.env` and paste your Google Gemini API key:
+Open `.env` and paste your Anthropic Claude API key:
 ```env
-GEMINI_API_KEY=your_gemini_api_key_here
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
 ```
-*(Get a key from [Google AI Studio](https://aistudio.google.com/app/api-keys))*
+*(Get a key from [Anthropic Console](https://console.anthropic.com/))*
 
 ### 2. Single-Process Production Start (Quickest)
 This option runs the FastAPI backend and serves the compiled React production bundle on a single port.

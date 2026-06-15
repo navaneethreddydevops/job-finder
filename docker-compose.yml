@@ -4,11 +4,11 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - DATABASE_PATH=/data/jobs.db
     volumes:
       - jobs-data:/data
-      - ~/.gemini:/root/.gemini
+      - ~/.claude:/root/.claude
     ports:
       - "8000:8000"
     restart: unless-stopped

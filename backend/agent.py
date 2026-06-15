@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
-from claude_agent_sdk.types import McpStdioServerConfig, ToolUseBlock, ThinkingBlock, TextBlock, AssistantMessage
+from claude_agent_sdk.types import McpStdioServerConfig, ToolUseBlock, ThinkingBlock, TextBlock, AssistantMessage, ResultMessage
 
 # Load environment variables
 load_dotenv()
@@ -56,9 +56,11 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
 
     # Agent config
     import uuid
+    effective_session_id = session_id or str(uuid.uuid4())
     options = ClaudeAgentOptions(
-        session_id=None if is_resume else (session_id or str(uuid.uuid4())),
-        resume=session_id if is_resume else None,
+        session_id=effective_session_id if not is_resume else None,
+        resume=effective_session_id if is_resume else None,
+        model=None,
         mcp_servers=mcp_servers,
         output_format=JobList.model_json_schema(),
         permission_mode="bypassPermissions",
@@ -88,8 +90,8 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
     )
         
     async with ClaudeSDKClient(options) as client:
-        # We start the query
-        await client.query(prompt)
+        # We start the query, passing the session_id for conversation tracking
+        await client.query(prompt, session_id=effective_session_id)
         
         data = None
         # Process the response stream manually to extract tool execution logs and thinking
@@ -109,10 +111,14 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
                             await log_callback(block.text)
 
             # When the generator completes the task, it outputs a ResultMessage
-            if type(msg).__name__ == "ResultMessage":
-                if hasattr(msg, "structured_output") and msg.structured_output:
+            if isinstance(msg, ResultMessage):
+                if msg.is_error:
+                    error_detail = msg.errors if msg.errors else msg.result
+                    if log_callback:
+                        await log_callback(f"\n[Agent Error] {error_detail}\n")
+                elif msg.structured_output:
                     data = msg.structured_output
-                elif hasattr(msg, "result") and msg.result:
+                elif msg.result:
                     # Fallback to parse json directly
                     try:
                         # First try to find markdown json block

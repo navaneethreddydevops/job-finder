@@ -63,18 +63,21 @@ async def run_agent_task(query: str):
             is_resume=is_resume
         )
         
-        # Save results to local SQLite database
-        jobs_list = []
-        if hasattr(results, "jobs"):
-            jobs_list = results.jobs
-        elif isinstance(results, dict) and "jobs" in results:
-            jobs_list = results["jobs"]
-        
-        for job in jobs_list:
-            job_dict = job.model_dump() if hasattr(job, "model_dump") else (job.dict() if hasattr(job, "dict") else dict(job))
-            save_job(job_dict)
+        if results is None:
+            await publish_log("\n[Backend] Agent returned no results. This may indicate an API key issue or agent error.\n")
+        else:
+            # Save results to local SQLite database
+            jobs_list = []
+            if hasattr(results, "jobs"):
+                jobs_list = results.jobs
+            elif isinstance(results, dict) and "jobs" in results:
+                jobs_list = results["jobs"]
             
-        await publish_log("\n[Backend] Jobs list successfully updated in the SQLite database!\n")
+            for job in jobs_list:
+                job_dict = job.model_dump() if hasattr(job, "model_dump") else (job.dict() if hasattr(job, "dict") else dict(job))
+                save_job(job_dict)
+                
+            await publish_log(f"\n[Backend] {len(jobs_list)} jobs saved to the SQLite database!\n")
     except Exception as e:
         await publish_log(f"\n[Backend Error] Agent failed: {e}\n")
     finally:
