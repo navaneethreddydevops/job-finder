@@ -26,6 +26,28 @@ os.environ.pop("ANTHROPIC_API_KEY", None)
 os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 
+# Full built-in toolset granted to the orchestrator (see the Claude Agent SDK overview:
+# https://code.claude.com/docs/en/agent-sdk/overview) plus the project's MCP tools. This
+# makes the agent's capabilities explicit rather than relying on bypassPermissions alone.
+AGENT_ALLOWED_TOOLS = [
+    # Built-in tools
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Glob",
+    "Grep",
+    "WebSearch",
+    "WebFetch",
+    "Task",  # spawns the job_scout subagent (fan-out)
+    "TodoWrite",
+    # Project MCP tools
+    "mcp__job_finder_tools__web_search",
+    "mcp__job_finder_tools__fetch_webpage_content",
+    "mcp__puppeteer",  # headless browser server (all tools)
+]
+
+
 # Pydantic Schemas for Structured Output
 class JobItem(BaseModel):
     title: str = Field(description="The job title")
@@ -138,6 +160,7 @@ async def run_job_finder_agent(
         model=None,
         mcp_servers=mcp_servers,
         agents={"job_scout": job_scout},
+        allowed_tools=AGENT_ALLOWED_TOOLS,
         max_turns=80,
         output_format=JobList.model_json_schema(),
         permission_mode="bypassPermissions",

@@ -14,13 +14,20 @@ results with live agent-thought streaming.
 job-finder/
 ├── backend/
 │   ├── agent.py        # Claude Agent SDK orchestrator + job_scout subagent, schemas
+│   ├── auth.py         # Auth router: users/sessions, login/register/profile/password
+│   ├── resume.py       # Resume optimizer router: docx parse/generate + Claude call
 │   ├── main.py         # FastAPI app: /api/pull, /api/jobs, /api/stream (SSE), etc.
 │   ├── db.py           # SQLite persistence (jobs.db) + de-duplication
 │   ├── mcp_server.py   # FastMCP server exposing web_search + fetch_webpage_content
 │   ├── diag.py         # Standalone smoke-test harness for the backend
-│   └── jobs.db         # SQLite database (created at runtime)
+│   └── jobs.db         # SQLite database (jobs, users, resume_jobs)
 ├── frontend/
-│   └── src/App.jsx     # Single-component dashboard (state, SSE, WebMCP tools)
+│   └── src/
+│       ├── App.jsx         # Router root (BrowserRouter + protected routes)
+│       ├── auth.jsx        # AuthContext + apiFetch bearer-token helper
+│       ├── Dashboard.jsx   # Job dashboard (state, SSE, WebMCP tools)
+│       └── pages/          # Login, Register, Profile, ResumeOptimizer
+├── app_spec.md         # Spec for auth + resume optimizer + agent tools
 ├── .claude/launch.json # Preview server definitions (Frontend, Backend, MCP)
 └── pyproject.toml      # Python deps (managed with uv)
 ```
@@ -105,9 +112,115 @@ shown. This is enforced at every layer, so keep them in sync if you touch one:
   write the backend emits a `Database now holds …` line that the UI uses to refresh.
 - `GET /api/status`, `GET /api/health`, `PATCH /api/jobs/{id}/apply`, `POST /api/jobs/clear`.
 
+## Agent tools (Task 1)
+
+`backend/agent.py` declares `AGENT_ALLOWED_TOOLS` and passes it to
+`ClaudeAgentOptions(allowed_tools=...)`. It grants the full built-in toolset from the
+[Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) — `Read`,
+`Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite` —
+plus the project MCP tools (`mcp__job_finder_tools__*`, `mcp__puppeteer`). The `job_scout`
+subagent keeps its narrower MCP-only toolset.
+
+## Authentication (`backend/auth.py`)
+
+Email/password auth backed by the same SQLite DB. Username **is** the email; passwords are
+**≥ 8 chars**, hashed with stdlib `pbkdf2_hmac` (no external crypto deps). Bearer tokens
+live in `auth_sessions`. A test user `test@test.com` / `testtest` is seeded on startup.
+Endpoints (all under `/api`): `register`, `login`, `logout`, `me`, `profile` (PATCH),
+`change-password`. Protected routes depend on `get_current_user`. The frontend stores
+`{token, user}` in `localStorage` (`jf_auth`) via `auth.jsx` and attaches the bearer header
+through the `apiFetch` helper; React Router guards `/`, `/profile`, `/resume/optimizer`.
+
+## Resume Optimizer (`backend/resume.py`)
+
+Route `/resume/optimizer` (frontend) + `/api/resume/*` (backend). Split-pane UI: top chat
+takes a job description; left pane previews/edits the existing `.docx` resume; right pane is a
+structured editor of the Claude-optimized result, downloadable as a clean `.docx`.
+
+- **Preserve-and-augment + diff.** The optimizer returns **structured content**
+  (`{summary, sections:[{title, items:[{text, is_new}]}]}`): every original point is kept
+  (`is_new=false`) and JD-tailored points are added (`is_new=true`). The UI highlights `is_new`
+  items (green + "NEW" badge) — that's the diff. Stored in `resume_jobs.result_json`.
+- **Both sides editable.** Left pane Preview/Edit toggle (edit = textarea of extracted text,
+  sent back via the `original_text` form field on re-optimize). Right pane structured editor
+  (edit titles/bullets, add/remove). Edits saved via `PUT /api/resume/content`, which rebuilds
+  the downloadable `.docx`.
+- **Fit & clean output.** `docx-preview` renders with `ignoreWidth` so the page fits the pane.
+  The downloaded `.docx` is produced by the **`docx` skill** (bundled at `.claude/skills/docx/`
+  and enabled on the resume agent's `ClaudeAgentOptions` via `skills=["docx"]` +
+  `setting_sources=["project"]`); `build_docx_from_content` (US-Letter, Arial, heading styles,
+  real bullet lists) is the deterministic python-docx fallback. The diff lives in the UI, not
+  the file.
+- **State.** Persisted per user in `resume_jobs` (latest job wins) + `localStorage`
+  (`jf_resume_state`, includes edited content) so a refresh restores progress and edits.
+
+Endpoints: `POST /api/resume/optimize` (multipart: `job_description` + `original_text` or
+`resume` file; background task), `GET /api/resume/status` (progress bar),
+`GET /api/resume/result` (`{content, original_text, ...}`), `PUT /api/resume/content`
+(save edits + rebuild), `GET /api/resume/download`. See `app_spec.md` for full details.
+
+## Development workflow — follow this for ALL future work
+
+This repo follows the same development methodology as Anthropic's
+[autonomous-coding quickstart](https://github.com/anthropics/claude-quickstarts/tree/main/autonomous-coding).
+Apply these steps to every feature or change, in order:
+
+1. **Spec first — `app_spec.md` is the source of truth.** Before writing any code, add or
+   update the relevant section in `app_spec.md` (data model, endpoints, UX, dependencies).
+   Never implement first and document later. The spec is what you build against.
+2. **Define a feature checklist.** Break the work into a numbered list of concrete,
+   independently verifiable features/acceptance criteria (the equivalent of the quickstart's
+   `feature_list.json`). Track each as ☐ todo / ☑ done. Use the `TaskCreate`/`TaskUpdate`
+   tools for in-session tracking; record durable cross-session status in `app_spec.md`.
+3. **Implement incrementally.** Build one feature at a time. Keep changes small and focused;
+   don't bundle unrelated work into one pass.
+4. **Verify before marking done — test-driven, never assume.** A feature is "done" only
+   after it's been exercised and observed to work:
+   - **Backend:** drive endpoints with FastAPI `TestClient` (mock the Claude call when it
+     would hit the network) and confirm status codes + payloads.
+   - **Frontend:** use the preview workflow (`preview_start` → `preview_snapshot` /
+     `preview_screenshot` / `preview_console_logs`). Verify, don't ask the user to check.
+   - Clean up any throwaway test data you created (see how the seeded `test@test.com` user
+     is kept but ad-hoc rows are deleted).
+5. **Keep docs in sync.** Update `app_spec.md`, this file (`CLAUDE.md`), `AGENTS.md`, and
+   `README.md` whenever behavior changes — same change, same commit.
+6. **Commit per milestone** (only when the user asks). Each commit should leave the app in a
+   working, verified state, so progress is transparent and rollback is cheap.
+
+### Architectural principles (mirror the quickstart)
+
+- **Clean module separation.** One concern per module. New backend features get their own
+  router module (`auth.py`, `resume.py`) wired into `main.py` via `include_router`, never
+  piled into `main.py`. New frontend pages live in `frontend/src/pages/` and are added to the
+  router in `App.jsx`; shared logic (e.g. auth) lives in its own module (`auth.jsx`).
+- **Least-privilege / security by default.** Grant tools explicitly via `allowed_tools`
+  (Task 1), validate all inputs, hash secrets, and never widen permissions without reason.
+- **OAuth only** for any Claude call — drop `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` at
+  import time in every backend entrypoint (see `agent.py`, `resume.py`, `diag.py`).
+- **Persistent, resumable state.** Long-running / async work persists progress to SQLite and
+  (where relevant) `localStorage` so a refresh or restart restores it — as the resume
+  optimizer's `resume_jobs` + `jf_resume_state` do. Prefer this over in-memory-only state.
+
+### Working with Word documents — use the `docx` skill
+
+The **`docx` skill is bundled into this repo as a project skill** at `.claude/skills/docx/`
+(`SKILL.md` + `scripts/`) and is **wired into the Agent SDK**: the resume optimizer's
+`ClaudeAgentOptions` set `cwd=REPO_ROOT`, `setting_sources=["project"]`, `skills=["docx"]`,
+and grant the `Skill` tool (plus `Read`/`Write`/`Bash`/`Glob`/`Grep`) so the running agent can
+produce Word documents with the skill at runtime. The resume agent writes the polished `.docx`
+to a temp path; if the skill path is unavailable, `build_docx_from_content` (python-docx) is the
+deterministic fallback. Keep `.claude/skills/docx/` in the repo (committed) — removing it breaks
+the skill path.
+
+When you (the coding agent) implement or modify any Word feature, also invoke the
+**`docx` skill** (`anthropic-skills:docx`) and follow its guidance — don't hand-roll Word
+handling ad hoc.
+
 ## Conventions
 
-- Keep documentation current: this file, `AGENTS.md`, and `README.md` should reflect the
-  actual code. Update them when behavior changes.
-- Frontend is intentionally a single `App.jsx` component; it also registers **WebMCP**
-  tools (`document.modelContext`) so an in-browser agent can drive the dashboard.
+- Keep documentation current: `app_spec.md`, this file, `AGENTS.md`, and `README.md` should
+  reflect the actual code. Update them when behavior changes.
+- Frontend is a React Router app: `App.jsx` is the router root, `Dashboard.jsx` is the main
+  job dashboard, and `pages/` holds Login, Register, Profile, and ResumeOptimizer. The
+  dashboard also registers **WebMCP** tools (`document.modelContext`) so an in-browser agent
+  can drive it.

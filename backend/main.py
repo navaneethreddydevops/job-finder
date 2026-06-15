@@ -11,11 +11,19 @@ import sys
 sys.path.append(os.path.dirname(__file__))
 from agent import run_job_finder_agent
 from db import init_db, save_job, get_all_jobs, toggle_applied, delete_all_jobs
+from auth import init_auth_db, router as auth_router
+from resume import init_resume_db, router as resume_router
 
 # Initialize database schema
 init_db()
+init_auth_db()
+init_resume_db()
 
 app = FastAPI(title="C2C Job Finder Backend")
+
+# Authentication + resume optimizer routes
+app.include_router(auth_router)
+app.include_router(resume_router)
 
 # CORS middleware for local development
 app.add_middleware(
@@ -192,7 +200,23 @@ frontend_dist = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "frontend", "dist"
 )
 if os.path.exists(frontend_dist):
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="static")
+    from fastapi.responses import FileResponse
+
+    # Serve hashed assets directly.
+    assets_dir = os.path.join(frontend_dist, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    # SPA fallback: any non-/api path returns index.html so client-side routes
+    # (e.g. /login, /resume/optimizer) work on direct navigation / refresh.
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        candidate = os.path.join(frontend_dist, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
 else:
 
     @app.get("/")

@@ -31,6 +31,9 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 * **Model**: `model=None` — inherits whatever model the `claude` CLI is logged in with.
 * **max_turns**: `80` (multi-agent fan-out needs headroom).
 * **permission_mode**: `bypassPermissions`.
+* **allowed_tools**: `AGENT_ALLOWED_TOOLS` grants the full built-in toolset (`Read`, `Write`,
+  `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite`) plus the
+  project MCP tools (`mcp__job_finder_tools__*`, `mcp__puppeteer`).
 * **agents**: registers a `job_scout` subagent, which enables the built-in **Task** tool.
 * **mcp_servers**: `puppeteer` (headless browser) and `job_finder_tools` (custom search).
 * **output_format**: `JobList.model_json_schema()` for guaranteed structured output.

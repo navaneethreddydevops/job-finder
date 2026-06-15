@@ -11,7 +11,9 @@ A full-stack, Claude-powered dashboard that scours web portals for Corp-to-Corp 
 * **Custom tools + headless browser**: DuckDuckGo `web_search` and a BeautifulSoup `fetch_webpage_content` tool (the `job_finder_tools` MCP server), plus a Puppeteer MCP browser for blocked sites.
 * **Live thought console**: Streams agent reasoning and tool calls to the browser over Server-Sent Events.
 * **Sleek React Dashboard**: A dark-mode, glassmorphism web UI with statistics, search, multi-selection filters (C2C viability, Remote vs Onsite, Job Sources, Applied), and a details drawer.
-* **Unified Server**: Serves the static production React build directly from the Python backend.
+* **Authentication**: Email/password login & registration (8+ char passwords), profile editing, and password change. Seeded test user `test@test.com` / `testtest`.
+* **Resume Optimizer** (`/resume/optimizer`): Split-pane tool — paste a job description, drop in your existing Word resume (previewed in-browser), and Claude generates a tailored, downloadable `.docx`. Includes a progress bar and refresh-safe persisted state.
+* **Unified Server**: Serves the static production React build directly from the Python backend (with SPA fallback for client-side routes).
 
 ---
 
@@ -20,15 +22,21 @@ A full-stack, Claude-powered dashboard that scours web portals for Corp-to-Corp 
 job-finder/
 ├── backend/               # Python Backend
 │   ├── agent.py           # Claude Agent SDK orchestrator + job_scout subagent, schemas
-│   ├── main.py            # FastAPI server (REST + SSE)
+│   ├── auth.py            # Auth: users/sessions, login/register/profile/password
+│   ├── resume.py          # Resume optimizer: docx parse/generate + Claude call
+│   ├── main.py            # FastAPI server (REST + SSE), wires auth + resume routers
 │   ├── db.py              # SQLite persistence + de-duplication
 │   ├── mcp_server.py      # FastMCP server: web_search + fetch_webpage_content
-│   └── jobs.db            # SQLite job database (created at runtime)
+│   └── jobs.db            # SQLite database (jobs, users, resume_jobs)
 ├── frontend/              # Vite React Project
 │   ├── src/
-│   │   ├── App.jsx        # Dashboard Component
+│   │   ├── App.jsx        # Router root (BrowserRouter + protected routes)
+│   │   ├── auth.jsx       # AuthContext + apiFetch bearer-token helper
+│   │   ├── Dashboard.jsx  # Job dashboard (formerly App.jsx)
+│   │   ├── pages/         # Login, Register, Profile, ResumeOptimizer
 │   │   └── index.css      # CSS Design System
 │   └── vite.config.js     # Dev server proxy configuration
+├── app_spec.md            # Spec for auth + resume optimizer + agent tools
 ├── CLAUDE.md              # Guidance for AI agents working in this repo
 ├── AGENTS.md              # Agent design, tools, and response schema
 ├── pyproject.toml         # Python Dependencies (managed with uv)
