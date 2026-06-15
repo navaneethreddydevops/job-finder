@@ -34,6 +34,7 @@ class PullRequest(BaseModel):
 
 async def publish_log(msg: str):
     """Broadcasts a log message to all active stream connections."""
+    print(msg, flush=True)
     for q in list(log_queues):
         try:
             await q.put(msg)

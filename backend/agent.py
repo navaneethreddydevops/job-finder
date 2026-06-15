@@ -107,18 +107,29 @@ async def run_job_finder_agent(query: str, log_callback=None):
         if log_callback:
             await log_callback(msg)
 
+    # MCP Server configuration for browser access
+    mcp_servers = [
+        types.McpStdioServer(
+            name="puppeteer",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-puppeteer"],
+        )
+    ]
+
     # Agent config
     config = LocalAgentConfig(
         tools=[web_search, fetch_webpage_content],
+        mcp_servers=mcp_servers,
         hooks=[pre_tool_hook, post_tool_hook],
         response_schema=JobList,
         system_instructions=(
             "You are a professional Job Finder agent specializing in finding C2C (Corp-to-Corp) "
-            "Data Engineer roles. You must use the `web_search` tool to search for jobs on portals "
-            "like LinkedIn, Indeed, Dice, and other tech job boards. Analyze search results, fetch "
-            "specific details using `fetch_webpage_content` where necessary, and extract structured jobs. "
-            "Only return jobs that match the C2C criteria or where C2C/Corp-to-Corp is explicitly mentioned "
-            "or very likely. Highlight the C2C viability in the structured response."
+            "Data Engineer roles. You have access to both custom Python search tools (`web_search`, `fetch_webpage_content`) "
+            "and a headless browser via the Puppeteer MCP server. Use the `web_search` tool for quick web searches, "
+            "but if you need to bypass blocks or interact with complex sites, use the MCP browser tools (e.g., puppeteer_navigate) "
+            "to search for jobs on portals like LinkedIn, Indeed, Dice, and other tech job boards. Analyze results "
+            "and extract structured jobs. Only return jobs that match the C2C criteria or where C2C/Corp-to-Corp is "
+            "explicitly mentioned or very likely. Highlight the C2C viability in the structured response."
         )
     )
 
