@@ -1,12 +1,11 @@
 import os
 import json
 import asyncio
-import requests
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from google.antigravity import Agent, LocalAgentConfig, types
-from duckduckgo_search import DDGS
+
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+from claude_agent_sdk.types import McpStdioServerConfig, ToolUseBlock, ThinkingBlock, TextBlock, AssistantMessage
 
 # Load environment variables
 load_dotenv()
@@ -28,133 +27,86 @@ class JobItem(BaseModel):
 class JobList(BaseModel):
     jobs: list[JobItem] = Field(description="List of jobs found")
 
-# Custom Tools
-def web_search(query: str) -> str:
-    """Searches the web for a query and returns search result snippets.
-    
-    Args:
-        query: The search query, e.g. "C2C Data Engineer jobs linkedin".
-    """
-    try:
-        print(f"[Agent Tool] Searching DDG for: {query}")
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=8))
-            if not results:
-                return "No search results found."
-            formatted = []
-            for r in results:
-                formatted.append(f"Title: {r.get('title')}\nURL: {r.get('href')}\nSnippet: {r.get('body')}\n---")
-            return "\n".join(formatted)
-    except Exception as e:
-        return f"Error performing search: {e}"
-
-def fetch_webpage_content(url: str) -> str:
-    """Fetches the text content of a webpage to extract detailed job requirements.
-    
-    Args:
-        url: The absolute URL of the webpage to fetch.
-    """
-    try:
-        print(f"[Agent Tool] Fetching URL: {url}")
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code >= 400:
-            return f"Failed to fetch content, status: {resp.status_code}"
-        
-        soup = BeautifulSoup(resp.text, "html.parser")
-        # Remove scripts, styles, headers, footers
-        for element in soup(["script", "style", "meta", "noscript", "header", "footer", "nav"]):
-            element.decompose()
-        
-        text = soup.get_text(separator=" ")
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = "\n".join(chunk for chunk in chunks if chunk)
-        # Limit to 4000 characters to avoid context bloat
-        return text[:4000]
-    except Exception as e:
-        return f"Error fetching webpage: {e}"
-
 # Running the Agent with real-time thought logs
-async def run_job_finder_agent(query: str, log_callback=None):
-    """Initializes and executes the job finder agent using the Google Antigravity SDK.
+async def run_job_finder_agent(query: str, log_callback=None, session_id=None, is_resume=False):
+    """Initializes and executes the job finder agent using the claude-agent-sdk.
     
     Args:
         query: Search criteria, e.g. "C2C Data Engineer"
         log_callback: Async function to stream thoughts/logs to (receives strings)
+        session_id: A valid UUID string.
+        is_resume: Whether the session_id is for an existing session to resume.
     """
-    # Using Gemini CLI authenticated session if GEMINI_API_KEY is not set or is the placeholder
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key or api_key == "your_gemini_api_key_here":
-        os.environ.pop("GEMINI_API_KEY", None)
-        print("[Agent] No valid GEMINI_API_KEY found, using default authenticated session.")
+    
+    if log_callback:
+        await log_callback(f"[Agent] Starting Job Search for query: '{query}'...\n")
 
-    from google.antigravity.hooks import hooks
-
-    # Local hooks to capture tool calls and stream them to the log callback
-    @hooks.pre_tool_call_decide
-    async def pre_tool_hook(data: types.ToolCall) -> types.HookResult:
-        msg = f"[Tool Call] Running tool '{data.name}' with arguments: {data.args}\n"
-        if log_callback:
-            await log_callback(msg)
-        return types.HookResult(allow=True)
-
-    @hooks.post_tool_call
-    async def post_tool_hook(data):
-        msg = f"[Tool Complete] Finished running tool.\n"
-        if log_callback:
-            await log_callback(msg)
-
-    # MCP Server configuration for browser access
-    mcp_servers = [
-        types.McpStdioServer(
-            name="puppeteer",
+    # MCP Server configuration
+    mcp_servers = {
+        "puppeteer": McpStdioServerConfig(
             command="npx",
             args=["-y", "@modelcontextprotocol/server-puppeteer"],
+        ),
+        "job_finder_tools": McpStdioServerConfig(
+            command="uv",
+            args=["run", "python", os.path.join(os.path.dirname(__file__), "mcp_server.py")],
         )
-    ]
+    }
 
     # Agent config
-    config = LocalAgentConfig(
-        tools=[web_search, fetch_webpage_content],
+    import uuid
+    options = ClaudeAgentOptions(
+        session_id=None if is_resume else (session_id or str(uuid.uuid4())),
+        resume=session_id if is_resume else None,
         mcp_servers=mcp_servers,
-        hooks=[pre_tool_hook, post_tool_hook],
-        response_schema=JobList,
-        system_instructions=(
+        output_format=JobList.model_json_schema(),
+        permission_mode="bypassPermissions",
+        system_prompt=(
             "You are a professional Job Finder agent specializing in finding C2C (Corp-to-Corp) "
-            "Data Engineer roles. You have access to both custom Python search tools (`web_search`, `fetch_webpage_content`) "
-            "and a headless browser via the Puppeteer MCP server. Use the `web_search` tool for quick web searches, "
-            "but if you need to bypass blocks or interact with complex sites, use the MCP browser tools (e.g., puppeteer_navigate) "
-            "to search for jobs on portals like LinkedIn, Indeed, Dice, and other tech job boards. Analyze results "
-            "and extract structured jobs. Only return jobs that match the C2C criteria or where C2C/Corp-to-Corp is "
+            "Data Engineer roles. You have access to custom Python search tools via the `job_finder_tools` MCP server "
+            "(`web_search`, `fetch_webpage_content`) and a headless browser via the `puppeteer` MCP server. "
+            "Use the `web_search` tool for quick web searches, but if you need to bypass blocks or interact with complex sites, "
+            "use the MCP browser tools (e.g., puppeteer_navigate) to search for jobs on portals like LinkedIn, Indeed, Dice, and other tech job boards. "
+            "Analyze results and extract structured jobs. Only return jobs that match the C2C criteria or where C2C/Corp-to-Corp is "
             "explicitly mentioned or very likely. Highlight the C2C viability in the structured response."
         )
     )
 
-    if log_callback:
-        await log_callback(f"[Agent] Starting Job Search for query: '{query}'...\n")
-
-    async with Agent(config) as agent:
-        prompt = (
-            f"Search for and compile a list of at least 5 to 10 C2C Data Engineer job postings matching "
-            f"the query '{query}'. Actively search across major portals like LinkedIn, Indeed, Monster, Dice, "
-            f"and other tech job boards. Use targeted search queries like 'C2C Data Engineer site:linkedin.com', "
-            f"'Corp-to-Corp Data Engineer site:indeed.com', 'Contract Data Engineer C2C site:monster.com', "
-            f"or 'Data Engineer C2C site:dice.com'. Filter out jobs that are strictly W2 or do not allow contract terms."
-        )
+    prompt = (
+        f"Search for and compile a list of at least 5 to 10 C2C Data Engineer job postings matching "
+        f"the query '{query}'. Actively search across major portals like LinkedIn, Indeed, Monster, Dice, "
+        f"and other tech job boards. Use targeted search queries like 'C2C Data Engineer site:linkedin.com', "
+        f"'Corp-to-Corp Data Engineer site:indeed.com', 'Contract Data Engineer C2C site:monster.com', "
+        f"or 'Data Engineer C2C site:dice.com'. Filter out jobs that are strictly W2 or do not allow contract terms."
+    )
         
-        response = await agent.chat(prompt)
+    async with ClaudeSDKClient(options) as client:
+        # We start the query
+        await client.query(prompt)
         
-        # Stream thoughts
-        async for thought in response.thoughts:
+        data = None
+        # Process the response stream manually to extract tool execution logs and thinking
+        async for msg in client.receive_response():
             if log_callback:
-                await log_callback(thought)
-        
-        # Get structured output
-        data = await response.structured_output()
-        
+                # If it's an assistant message, we can get thought process and tool execution
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, ThinkingBlock):
+                            # Emit thought
+                            await log_callback(block.thinking)
+                        elif isinstance(block, ToolUseBlock):
+                            # Emit tool use
+                            tool_msg = f"\n[Tool Call] Running tool '{block.name}' with arguments: {block.input}\n"
+                            await log_callback(tool_msg)
+                        elif isinstance(block, TextBlock):
+                            await log_callback(block.text)
+
+            # When the generator completes the task, it outputs a ResultMessage
+            if type(msg).__name__ == "ResultMessage":
+                if hasattr(msg, "structured_output") and msg.structured_output:
+                    data = msg.structured_output
+                break
+
         if log_callback:
             await log_callback("\n[Agent] Search complete. Parsing results...\n")
             

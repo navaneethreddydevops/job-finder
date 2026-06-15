@@ -26,7 +26,7 @@ app.add_middleware(
 )
 
 # Backend state variables
-agent_status = {"status": "idle", "query": None}
+agent_status = {"status": "idle", "query": None, "session_id": None}
 log_queues = []
 
 class PullRequest(BaseModel):
@@ -44,11 +44,24 @@ async def publish_log(msg: str):
 async def run_agent_task(query: str):
     """Background task to run the agent and save results to the SQLite database."""
     global agent_status
+    import uuid
     try:
         async def log_callback(thought: str):
             await publish_log(thought)
         
-        results = await run_job_finder_agent(query, log_callback=log_callback)
+        # Initialize a new session ID if one doesn't exist
+        is_resume = True
+        if not agent_status.get("session_id"):
+            agent_status["session_id"] = str(uuid.uuid4())
+            is_resume = False
+            
+        # Pass the tracked session_id
+        results = await run_job_finder_agent(
+            query, 
+            log_callback=log_callback, 
+            session_id=agent_status["session_id"],
+            is_resume=is_resume
+        )
         
         # Save results to local SQLite database
         jobs_list = []
@@ -67,6 +80,7 @@ async def run_agent_task(query: str):
     finally:
         agent_status["status"] = "idle"
         agent_status["query"] = None
+        # Keep the session_id alive for the next request
 
 class ApplyRequest(BaseModel):
     applied: bool
