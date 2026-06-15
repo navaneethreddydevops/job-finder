@@ -217,3 +217,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .env
+
+# Playwright MCP run artifacts (page snapshots, console logs)
+.playwright-mcp/
+
+# Claude Code local config
+.claude/

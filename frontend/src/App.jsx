@@ -19,7 +19,7 @@ import {
 function App() {
   const [jobs, setJobs] = useState([]);
   const [status, setStatus] = useState({ status: 'idle', query: null });
-  const [query, setQuery] = useState('C2C Data Engineer');
+  const [query, setQuery] = useState('Senior Data Engineer');
   const [logs, setLogs] = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
   const [activeAgentTool, setActiveAgentTool] = useState(null);
@@ -56,13 +56,26 @@ function App() {
     selectedJob
   };
 
-  // Fetch jobs list
+  // Only surface fresh jobs: posted on the run date / within the last 24 hours.
+  // Trust the backend's structured flag first, then fall back to parsing the
+  // free-text date_posted ("3 hours ago", "today", "1 day ago", ...).
+  const isWithin24h = (job) => {
+    if (job.posted_within_24h) return true;
+    const d = (job.date_posted || '').toLowerCase();
+    if (!d) return false;
+    if (/(just|now|moment|today|hour|minute|second)/.test(d)) return true;
+    const dayMatch = d.match(/(\d+)\s*day/);
+    if (dayMatch && parseInt(dayMatch[1], 10) <= 1) return true;
+    return false;
+  };
+
+  // Fetch jobs list (filtered to the last 24 hours)
   const fetchJobs = async () => {
     try {
       const resp = await fetch('/api/jobs');
       if (resp.ok) {
         const data = await resp.json();
-        setJobs(data.jobs || []);
+        setJobs((data.jobs || []).filter(isWithin24h));
       }
     } catch (err) {
       console.error("Failed to fetch jobs:", err);
@@ -118,6 +131,11 @@ function App() {
       try {
         const data = JSON.parse(event.data);
         setLogs((prev) => [...prev, data.message]);
+        // Refresh the jobs list as soon as the backend reports a DB write, so the
+        // dashboard reflects new jobs without waiting on the status poll.
+        if (typeof data.message === 'string' && data.message.includes('Database now holds')) {
+          fetchJobs();
+        }
       } catch (err) {
         console.error("Failed to parse log message:", err);
       }
@@ -954,7 +972,7 @@ function App() {
                 <button 
                   id="empty-state-default-btn"
                   className="btn btn-primary"
-                  onClick={() => setQuery('C2C Data Engineer')}
+                  onClick={() => setQuery('Senior Data Engineer')}
                   disabled={status.status === 'running'}
                   style={{ marginTop: '0.5rem' }}
                 >

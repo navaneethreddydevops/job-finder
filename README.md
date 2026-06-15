@@ -5,10 +5,13 @@ A full-stack, Claude-powered dashboard that scours web portals for Corp-to-Corp 
 ---
 
 ## Features
-* **AI Job Finder Agent**: Uses DuckDuckGo search and custom webpage text parsers to find jobs and extract details.
-* **Turn & Tool Hooks**: Intercepts agent thoughts and tool runs to stream logs live to the browser.
-* **Sleek React Dashboard**: A dark-mode, glassmorphism-based web interface featuring statistics, search, multi-selection filters (C2C viability, Remote vs Onsite, Job Sources), and a details drawer.
-* **Unified Server**: Serving static production React files directly from the Python backend.
+* **Multi-agent Job Finder**: An orchestrator fans the search out to parallel `job_scout` subagents (via the Task tool), one per source (LinkedIn, Dice, Monster, Indeed, ZipRecruiter), then merges and de-duplicates the results.
+* **Fresh-only results**: Collects and displays **only jobs posted within the last 24 hours** (today / the run date).
+* **No volume cap**: Pulls as many matching C2C roles as it can find.
+* **Custom tools + headless browser**: DuckDuckGo `web_search` and a BeautifulSoup `fetch_webpage_content` tool (the `job_finder_tools` MCP server), plus a Puppeteer MCP browser for blocked sites.
+* **Live thought console**: Streams agent reasoning and tool calls to the browser over Server-Sent Events.
+* **Sleek React Dashboard**: A dark-mode, glassmorphism web UI with statistics, search, multi-selection filters (C2C viability, Remote vs Onsite, Job Sources, Applied), and a details drawer.
+* **Unified Server**: Serves the static production React build directly from the Python backend.
 
 ---
 
@@ -16,16 +19,19 @@ A full-stack, Claude-powered dashboard that scours web portals for Corp-to-Corp 
 ```
 job-finder/
 ├── backend/               # Python Backend
-│   ├── agent.py           # Antigravity Agent, tools, and schemas
-│   ├── main.py            # FastAPI Server
-│   └── jobs.json          # Cached job listings database
+│   ├── agent.py           # Claude Agent SDK orchestrator + job_scout subagent, schemas
+│   ├── main.py            # FastAPI server (REST + SSE)
+│   ├── db.py              # SQLite persistence + de-duplication
+│   ├── mcp_server.py      # FastMCP server: web_search + fetch_webpage_content
+│   └── jobs.db            # SQLite job database (created at runtime)
 ├── frontend/              # Vite React Project
 │   ├── src/
 │   │   ├── App.jsx        # Dashboard Component
 │   │   └── index.css      # CSS Design System
 │   └── vite.config.js     # Dev server proxy configuration
-├── pyproject.toml         # Python Dependencies
-├── .env.example           # Environment template
+├── CLAUDE.md              # Guidance for AI agents working in this repo
+├── AGENTS.md              # Agent design, tools, and response schema
+├── pyproject.toml         # Python Dependencies (managed with uv)
 └── README.md              # Project Documentation
 ```
 
@@ -33,16 +39,14 @@ job-finder/
 
 ## Setup & Running Instructions
 
-### 1. Add API Key
-Copy [.env.example](file:///.env.example) to `.env` in the root:
+### 1. Authentication — Claude OAuth (no API key)
+This project authenticates to Claude through the **Claude CLI's stored OAuth login**, not
+an API key. Make sure you're logged in once:
 ```bash
-cp .env.example .env
+claude login
 ```
-Open `.env` and paste your Anthropic Claude API key:
-```env
-ANTHROPIC_API_KEY=your_anthropic_api_key_here
-```
-*(Get a key from [Anthropic Console](https://console.anthropic.com/))*
+The backend deliberately ignores `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` and always
+uses the OAuth credentials in `~/.claude`. No `.env` API key is required.
 
 ### 2. Single-Process Production Start (Quickest)
 This option runs the FastAPI backend and serves the compiled React production bundle on a single port.
@@ -78,5 +82,5 @@ If you wish to make live modifications to React code or styles:
 ---
 
 ## Further Documentation
-* For details on agent design, tools, and response schemas, see [agents.md](file:///Users/navaneethreddy/Documents/Github/job-finder/agents.md).
-* For a full walkthrough of implemented files and verification results, see [walkthrough.md](file:///Users/navaneethreddy/.gemini/antigravity-ide/brain/ab8c02d6-5572-4dbc-ab82-b43d5113f620/walkthrough.md).
+* For agent design, tools, and the response schema, see [AGENTS.md](AGENTS.md).
+* For repo-wide architecture, conventions, and key invariants (OAuth-only auth, the 24-hour freshness rule), see [CLAUDE.md](CLAUDE.md).
