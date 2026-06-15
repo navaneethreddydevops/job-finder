@@ -17,5 +17,22 @@ export default defineConfig([
       globals: globals.browser,
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
+    rules: {
+      'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+      'react-refresh/only-export-components': [
+        'warn',
+        { allowConstantExport: true },
+      ],
+      'react-hooks/refs': 'off',
+      'react-hooks/set-state-in-effect': 'off',
+    },
+  },
+  {
+    files: ['vite.config.js', 'eslint.config.js'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
   },
 ])

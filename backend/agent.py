@@ -1,12 +1,19 @@
 import os
 import json
-import asyncio
 import re
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
-from claude_agent_sdk.types import McpStdioServerConfig, AgentDefinition, ToolUseBlock, ThinkingBlock, TextBlock, AssistantMessage, ResultMessage
+from claude_agent_sdk.types import (
+    McpStdioServerConfig,
+    AgentDefinition,
+    ToolUseBlock,
+    ThinkingBlock,
+    TextBlock,
+    AssistantMessage,
+    ResultMessage,
+)
 
 # Load environment variables
 load_dotenv()
@@ -18,36 +25,60 @@ load_dotenv()
 os.environ.pop("ANTHROPIC_API_KEY", None)
 os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
+
 # Pydantic Schemas for Structured Output
 class JobItem(BaseModel):
     title: str = Field(description="The job title")
     company: str = Field(description="The company name")
-    location: str = Field(description="The location, e.g. 'Remote', 'City, State', or 'Hybrid'")
+    location: str = Field(
+        description="The location, e.g. 'Remote', 'City, State', or 'Hybrid'"
+    )
     url: str = Field(description="The direct job posting link or source URL")
-    date_posted: str = Field(description="Date posted or found, e.g. '2 hours ago', 'today', 'June 12'")
-    posted_within_24h: bool = Field(description="True ONLY if the job was posted within the last 24 hours (i.e. today / on the run date). Set False for anything older or if the posting date is unknown.")
-    c2c_viability: str = Field(description="Confirmation of C2C viability: 'Confirmed C2C', 'Likely C2C' (if mentions C2C or corp-to-corp but not explicitly confirmed), or 'Not Specified'")
-    key_requirements: list[str] = Field(description="List of key requirements/skills mentioned")
-    contact_email: str | None = Field(None, description="Recruiter or contact email address if available")
-    contact_phone: str | None = Field(None, description="Recruiter or contact phone number if available")
-    source: str = Field(description="Source website/portal, e.g., LinkedIn, Indeed, Dice, etc.")
-    description: str = Field(description="Short summary of the job description, C2C terms, and other details")
+    date_posted: str = Field(
+        description="Date posted or found, e.g. '2 hours ago', 'today', 'June 12'"
+    )
+    posted_within_24h: bool = Field(
+        description="True ONLY if the job was posted within the last 24 hours (i.e. today / on the run date). Set False for anything older or if the posting date is unknown."
+    )
+    c2c_viability: str = Field(
+        description="Confirmation of C2C viability: 'Confirmed C2C', 'Likely C2C' (if mentions C2C or corp-to-corp but not explicitly confirmed), or 'Not Specified'"
+    )
+    key_requirements: list[str] = Field(
+        description="List of key requirements/skills mentioned"
+    )
+    contact_email: str | None = Field(
+        None, description="Recruiter or contact email address if available"
+    )
+    contact_phone: str | None = Field(
+        None, description="Recruiter or contact phone number if available"
+    )
+    source: str = Field(
+        description="Source website/portal, e.g., LinkedIn, Indeed, Dice, etc."
+    )
+    description: str = Field(
+        description="Short summary of the job description, C2C terms, and other details"
+    )
+
 
 class JobList(BaseModel):
     jobs: list[JobItem] = Field(description="List of jobs found")
 
+
 # Running the Agent with real-time thought logs
-async def run_job_finder_agent(query: str, log_callback=None, session_id=None, is_resume=False):
+async def run_job_finder_agent(
+    query: str, log_callback=None, session_id=None, is_resume=False
+):
     """Initializes and executes the job finder agent using the claude-agent-sdk.
-    
+
     Args:
         query: Search criteria, e.g. "C2C Data Engineer"
         log_callback: Async function to stream thoughts/logs to (receives strings)
         session_id: A valid UUID string.
         is_resume: Whether the session_id is for an existing session to resume.
     """
-    
+
     from datetime import datetime, timezone
+
     run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     if log_callback:
@@ -61,8 +92,12 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
         ),
         "job_finder_tools": McpStdioServerConfig(
             command="uv",
-            args=["run", "python", os.path.join(os.path.dirname(__file__), "mcp_server.py")],
-        )
+            args=[
+                "run",
+                "python",
+                os.path.join(os.path.dirname(__file__), "mcp_server.py"),
+            ],
+        ),
     }
 
     # Subagent used to parallelize the search across job boards. The orchestrator
@@ -95,6 +130,7 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
 
     # Agent config
     import uuid
+
     effective_session_id = session_id or str(uuid.uuid4())
     options = ClaudeAgentOptions(
         session_id=effective_session_id if not is_resume else None,
@@ -122,11 +158,13 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
             "accurately on every job. "
             "CRITICAL: Your final answer MUST be valid JSON matching the provided schema (a single 'jobs' key holding "
             "the full merged list). Do not return conversational markdown."
-        )
+        ),
     )
 
     if log_callback:
-        await log_callback(f"\n[Debug] ANTHROPIC_API_KEY in env: {'ANTHROPIC_API_KEY' in os.environ}\n")
+        await log_callback(
+            f"\n[Debug] ANTHROPIC_API_KEY in env: {'ANTHROPIC_API_KEY' in os.environ}\n"
+        )
         await log_callback(f"[Debug] Options model: {options.model}\n")
 
     prompt = (
@@ -148,11 +186,11 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
         f"{json.dumps(JobList.model_json_schema())}\n"
         f"Do not include any other markdown tables or conversational text in your final response."
     )
-        
+
     async with ClaudeSDKClient(options) as client:
         # We start the query, passing the session_id for conversation tracking
         await client.query(prompt, session_id=effective_session_id)
-        
+
         data = None
         # Process the response stream manually to extract tool execution logs and thinking
         async for msg in client.receive_response():
@@ -182,10 +220,14 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
                     # Fallback to parse json directly
                     try:
                         # First try to find markdown json block
-                        match = re.search(r'```json\s*(\{.*?\})\s*```', msg.result, re.DOTALL | re.IGNORECASE)
+                        match = re.search(
+                            r"```json\s*(\{.*?\})\s*```",
+                            msg.result,
+                            re.DOTALL | re.IGNORECASE,
+                        )
                         if not match:
                             # Fallback to finding just the outer brackets
-                            match = re.search(r'(\{.*\})', msg.result, re.DOTALL)
+                            match = re.search(r"(\{.*\})", msg.result, re.DOTALL)
                         if match:
                             data = json.loads(match.group(1))
                     except Exception as e:
@@ -194,5 +236,5 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
 
         if log_callback:
             await log_callback("\n[Agent] Search complete. Parsing results...\n")
-            
+
         return data

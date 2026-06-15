@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Briefcase, 
   Search, 
@@ -141,7 +141,7 @@ function App() {
       }
     };
 
-    eventSource.onerror = (err) => {
+    eventSource.onerror = () => {
       console.log("SSE Connection closed or encountered error, closing stream.");
       eventSource.close();
     };
@@ -222,7 +222,7 @@ function App() {
         } else {
           setHealthStatus('error');
         }
-      } catch (err) {
+      } catch {
         setHealthStatus('error');
       }
     };

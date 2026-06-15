@@ -9,10 +9,12 @@ db_dir = os.path.dirname(DB_PATH)
 if db_dir:
     os.makedirs(db_dir, exist_ok=True)
 
+
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init_db():
     conn = get_db_connection()
@@ -39,9 +41,12 @@ def init_db():
     cursor.execute("PRAGMA table_info(jobs)")
     existing_cols = {row[1] for row in cursor.fetchall()}
     if "posted_within_24h" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN posted_within_24h INTEGER DEFAULT 0")
+        cursor.execute(
+            "ALTER TABLE jobs ADD COLUMN posted_within_24h INTEGER DEFAULT 0"
+        )
     conn.commit()
     conn.close()
+
 
 def save_job(job_dict):
     """
@@ -76,52 +81,59 @@ def save_job(job_dict):
     if row:
         # Update existing job but preserve applied status
         job_id = row["id"]
-        cursor.execute("""
+        cursor.execute(
+            """
             UPDATE jobs
             SET title = ?, company = ?, location = ?, date_posted = ?,
                 c2c_viability = ?, key_requirements = ?, contact_email = ?,
                 contact_phone = ?, source = ?, description = ?, posted_within_24h = ?
             WHERE id = ?
-        """, (
-            title,
-            company,
-            location,
-            job_dict.get("date_posted"),
-            job_dict.get("c2c_viability"),
-            key_reqs_json,
-            job_dict.get("contact_email"),
-            job_dict.get("contact_phone"),
-            job_dict.get("source"),
-            job_dict.get("description"),
-            posted_within_24h,
-            job_id
-        ))
+        """,
+            (
+                title,
+                company,
+                location,
+                job_dict.get("date_posted"),
+                job_dict.get("c2c_viability"),
+                key_reqs_json,
+                job_dict.get("contact_email"),
+                job_dict.get("contact_phone"),
+                job_dict.get("source"),
+                job_dict.get("description"),
+                posted_within_24h,
+                job_id,
+            ),
+        )
     else:
         # Insert new job
         inserted = True
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO jobs (
                 title, company, location, url, date_posted,
                 c2c_viability, key_requirements, contact_email,
                 contact_phone, source, description, applied, posted_within_24h
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-        """, (
-            title,
-            company,
-            location,
-            url,
-            job_dict.get("date_posted"),
-            job_dict.get("c2c_viability"),
-            key_reqs_json,
-            job_dict.get("contact_email"),
-            job_dict.get("contact_phone"),
-            job_dict.get("source"),
-            job_dict.get("description"),
-            posted_within_24h
-        ))
+        """,
+            (
+                title,
+                company,
+                location,
+                url,
+                job_dict.get("date_posted"),
+                job_dict.get("c2c_viability"),
+                key_reqs_json,
+                job_dict.get("contact_email"),
+                job_dict.get("contact_phone"),
+                job_dict.get("source"),
+                job_dict.get("description"),
+                posted_within_24h,
+            ),
+        )
     conn.commit()
     conn.close()
     return inserted
+
 
 def get_all_jobs():
     conn = get_db_connection()
@@ -143,12 +155,16 @@ def get_all_jobs():
     conn.close()
     return jobs
 
+
 def toggle_applied(job_id: int, applied: bool):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE jobs SET applied = ? WHERE id = ?", (1 if applied else 0, job_id))
+    cursor.execute(
+        "UPDATE jobs SET applied = ? WHERE id = ?", (1 if applied else 0, job_id)
+    )
     conn.commit()
     conn.close()
+
 
 def delete_all_jobs():
     conn = get_db_connection()
