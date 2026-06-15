@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import re
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
@@ -68,7 +69,8 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
             "Use the `web_search` tool for quick web searches, but if you need to bypass blocks or interact with complex sites, "
             "use the MCP browser tools (e.g., puppeteer_navigate) to search for jobs on portals like LinkedIn, Indeed, Dice, and other tech job boards. "
             "Analyze results and extract structured jobs. Only return jobs that match the C2C criteria or where C2C/Corp-to-Corp is "
-            "explicitly mentioned or very likely. Highlight the C2C viability in the structured response."
+            "explicitly mentioned or very likely. Highlight the C2C viability in the structured response. "
+            "CRITICAL: You MUST output your final answer as valid JSON matching the schema provided. Do not return conversational markdown."
         )
     )
 
@@ -77,7 +79,11 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
         f"the query '{query}'. Actively search across major portals like LinkedIn, Indeed, Monster, Dice, "
         f"and other tech job boards. Use targeted search queries like 'C2C Data Engineer site:linkedin.com', "
         f"'Corp-to-Corp Data Engineer site:indeed.com', 'Contract Data Engineer C2C site:monster.com', "
-        f"or 'Data Engineer C2C site:dice.com'. Filter out jobs that are strictly W2 or do not allow contract terms."
+        f"or 'Data Engineer C2C site:dice.com'. Filter out jobs that are strictly W2 or do not allow contract terms. "
+        f"\n\nCRITICAL: When you are done, you MUST return the final list of jobs as ONLY a valid JSON object wrapped in ```json ... ``` blocks. "
+        f"The JSON object must have a single key 'jobs' containing a list of job objects. Each job object must match this schema:\n"
+        f"{json.dumps(JobList.model_json_schema())}\n"
+        f"Do not include any other markdown tables or conversational text in your final response."
     )
         
     async with ClaudeSDKClient(options) as client:
@@ -105,6 +111,18 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
             if type(msg).__name__ == "ResultMessage":
                 if hasattr(msg, "structured_output") and msg.structured_output:
                     data = msg.structured_output
+                elif hasattr(msg, "result") and msg.result:
+                    # Fallback to parse json directly
+                    try:
+                        # First try to find markdown json block
+                        match = re.search(r'```json\s*(\{.*?\})\s*```', msg.result, re.DOTALL | re.IGNORECASE)
+                        if not match:
+                            # Fallback to finding just the outer brackets
+                            match = re.search(r'(\{.*\})', msg.result, re.DOTALL)
+                        if match:
+                            data = json.loads(match.group(1))
+                    except Exception as e:
+                        print("Failed to parse JSON fallback:", e)
                 break
 
         if log_callback:
