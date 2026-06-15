@@ -32,6 +32,9 @@ function App() {
   const [selectedLocation, setSelectedLocation] = useState('All');
   const [selectedApplied, setSelectedApplied] = useState('All');
 
+  const [currentPage, setCurrentPage] = useState(1);
+  const JOBS_PER_PAGE = 12;
+
   const consoleEndRef = useRef(null);
   const eventSourceRef = useRef(null);
   const dialogRef = useRef(null);
@@ -294,6 +297,14 @@ function App() {
       return matchesSearch && matchesC2C && matchesSource && matchesLocation && matchesApplied;
     });
   }, [jobs, searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied]);
+
+  // Reset pagination when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied]);
+
+  const totalPages = Math.ceil(filteredJobs.length / JOBS_PER_PAGE);
+  const paginatedJobs = filteredJobs.slice((currentPage - 1) * JOBS_PER_PAGE, currentPage * JOBS_PER_PAGE);
 
   // Push filtered list to stateRef so WebMCP tools retrieve the correct indexes
   stateRef.current.filteredJobs = filteredJobs;
@@ -575,8 +586,7 @@ function App() {
         <div className="logo-section">
           <Briefcase className="logo-icon" size={28} />
           <div>
-            <span className="logo-text">AI C2C Job Finder</span>
-            <span className="logo-badge">Gemini-Powered</span>
+            <span className="logo-text">Job Finder</span>
           </div>
         </div>
 
@@ -586,16 +596,6 @@ function App() {
             <span>Agent Active: {activeAgentTool}</span>
           </div>
         )}
-
-        {/* Backend Health Badge */}
-        <div className="logo-badge" style={{ 
-          background: healthStatus === 'ok' ? 'rgba(16, 185, 129, 0.2)' : healthStatus === 'error' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(107, 114, 128, 0.2)',
-          color: healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--text-muted)',
-          display: 'flex', alignItems: 'center', gap: '0.4rem', border: `1px solid ${healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--border)'}`
-        }}>
-          <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--text-muted)' }}></div>
-          <span>Backend: {healthStatus === 'ok' ? 'Online' : healthStatus === 'error' ? 'Offline' : 'Checking...'}</span>
-        </div>
 
         <div className="header-actions">
           <button 
@@ -608,6 +608,16 @@ function App() {
             <RefreshCw size={16} className={status.status === 'running' ? 'spin' : ''} />
             Sync Database
           </button>
+
+          {/* Backend Health Badge */}
+          <div className="logo-badge" style={{ 
+            background: healthStatus === 'ok' ? 'rgba(16, 185, 129, 0.2)' : healthStatus === 'error' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(107, 114, 128, 0.2)',
+            color: healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--text-muted)',
+            display: 'flex', alignItems: 'center', gap: '0.4rem', border: `1px solid ${healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--border)'}`
+          }}>
+            <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--text-muted)' }}></div>
+            <span>Backend: {healthStatus === 'ok' ? 'Online' : healthStatus === 'error' ? 'Offline' : 'Checking...'}</span>
+          </div>
         </div>
       </header>
 
@@ -826,85 +836,110 @@ function App() {
 
           {/* Job List Container */}
           {filteredJobs.length > 0 ? (
-            <div className="jobs-grid" id="jobs-grid">
-              {filteredJobs.map((job, idx) => (
-                <div 
-                  key={idx} 
-                  id={`job-card-${idx}`}
-                  className={`job-card ${job.applied ? 'applied' : ''}`}
-                  onClick={() => setSelectedJob(job)}
-                >
-                  <div className="job-card-header">
-                    <div style={{ flex: 1 }}>
-                      <h3 className="job-title">{job.title}</h3>
-                      <span className="job-company">{job.company}</span>
+            <>
+              <div className="jobs-grid" id="jobs-grid">
+                {paginatedJobs.map((job, localIdx) => {
+                  const absoluteIdx = (currentPage - 1) * JOBS_PER_PAGE + localIdx;
+                  return (
+                  <div 
+                    key={absoluteIdx} 
+                    id={`job-card-${absoluteIdx}`}
+                    className={`job-card ${job.applied ? 'applied' : ''}`}
+                    onClick={() => setSelectedJob(job)}
+                  >
+                    <div className="job-card-header">
+                      <div style={{ flex: 1 }}>
+                        <h3 className="job-title">{job.title}</h3>
+                        <span className="job-company">{job.company}</span>
+                      </div>
+                      <button
+                        className={`btn-toggle-applied ${job.applied ? 'applied' : ''}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleApplied(job.id, job.applied);
+                        }}
+                        title={job.applied ? "Mark as Not Applied" : "Mark as Applied"}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: job.applied ? 'var(--success)' : 'var(--text-muted)',
+                          cursor: 'pointer',
+                          padding: '0.25rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          marginTop: '-0.25rem',
+                          marginRight: '-0.25rem'
+                        }}
+                      >
+                        <CheckCircle2 size={18} fill={job.applied ? 'var(--success-glow)' : 'transparent'} />
+                      </button>
                     </div>
-                    <button
-                      className={`btn-toggle-applied ${job.applied ? 'applied' : ''}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleToggleApplied(job.id, job.applied);
-                      }}
-                      title={job.applied ? "Mark as Not Applied" : "Mark as Applied"}
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        color: job.applied ? 'var(--success)' : 'var(--text-muted)',
-                        cursor: 'pointer',
-                        padding: '0.25rem',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        marginTop: '-0.25rem',
-                        marginRight: '-0.25rem'
-                      }}
-                    >
-                      <CheckCircle2 size={18} fill={job.applied ? 'var(--success-glow)' : 'transparent'} />
-                    </button>
-                  </div>
 
-                  <div className="job-meta-row">
-                    <span className="job-meta-item">
-                      <MapPin size={12} />
-                      {job.location}
-                    </span>
-                    <span className="job-meta-item">
-                      <Calendar size={12} />
-                      {job.date_posted}
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                    <span className={`badge ${
-                      job.c2c_viability === 'Confirmed C2C' ? 'badge-c2c-confirmed' :
-                      job.c2c_viability === 'Likely C2C' ? 'badge-c2c-likely' : 'badge-c2c-unknown'
-                    }`}>
-                      {job.c2c_viability}
-                    </span>
-                    <span className="badge badge-source">
-                      {job.source}
-                    </span>
-                    {job.applied && (
-                      <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(16, 185, 129, 0.2)', textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
-                        <CheckCircle2 size={10} />
-                        Applied
+                    <div className="job-meta-row">
+                      <span className="job-meta-item">
+                        <MapPin size={12} />
+                        {job.location}
                       </span>
-                    )}
-                  </div>
+                      <span className="job-meta-item">
+                        <Calendar size={12} />
+                        {job.date_posted}
+                      </span>
+                    </div>
 
-                  <p className="job-desc-preview">{job.description}</p>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <span className={`badge ${
+                        job.c2c_viability === 'Confirmed C2C' ? 'badge-c2c-confirmed' :
+                        job.c2c_viability === 'Likely C2C' ? 'badge-c2c-likely' : 'badge-c2c-unknown'
+                      }`}>
+                        {job.c2c_viability}
+                      </span>
+                      <span className="badge badge-source">
+                        {job.source}
+                      </span>
+                      {job.applied && (
+                        <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(16, 185, 129, 0.2)', textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
+                          <CheckCircle2 size={10} />
+                          Applied
+                        </span>
+                      )}
+                    </div>
 
-                  <div className="job-requirements">
-                    {job.key_requirements.slice(0, 4).map((req, rIdx) => (
-                      <span key={rIdx} className="requirement-tag">{req}</span>
-                    ))}
-                    {job.key_requirements.length > 4 && (
-                      <span className="requirement-tag">+{job.key_requirements.length - 4} more</span>
-                    )}
+                    <p className="job-desc-preview">{job.description}</p>
+
+                    <div className="job-requirements">
+                      {job.key_requirements.slice(0, 4).map((req, rIdx) => (
+                        <span key={rIdx} className="requirement-tag">{req}</span>
+                      ))}
+                      {job.key_requirements.length > 4 && (
+                        <span className="requirement-tag">+{job.key_requirements.length - 4} more</span>
+                      )}
+                    </div>
                   </div>
+                )})}
+              </div>
+              
+              {/* Pagination Controls */}
+              {totalPages > 1 && (
+                <div className="pagination-container">
+                  <button 
+                    className="btn btn-pagination" 
+                    disabled={currentPage === 1}
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  >
+                    Previous
+                  </button>
+                  <span className="pagination-info">Page {currentPage} of {totalPages}</span>
+                  <button 
+                    className="btn btn-pagination" 
+                    disabled={currentPage === totalPages}
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  >
+                    Next
+                  </button>
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           ) : (
             <div className="empty-state" id="empty-state-view">
               <Briefcase size={48} className="empty-state-icon" />

@@ -67,19 +67,20 @@ async def run_job_finder_agent(query: str, log_callback=None, session_id=None, i
             "Data Engineer roles. You have access to custom Python search tools via the `job_finder_tools` MCP server "
             "(`web_search`, `fetch_webpage_content`) and a headless browser via the `puppeteer` MCP server. "
             "Use the `web_search` tool for quick web searches, but if you need to bypass blocks or interact with complex sites, "
-            "use the MCP browser tools (e.g., puppeteer_navigate) to search for jobs on portals like LinkedIn, Indeed, Dice, and other tech job boards. "
-            "Analyze results and extract structured jobs. Only return jobs that match the C2C criteria or where C2C/Corp-to-Corp is "
+            "use the MCP browser tools (e.g., puppeteer_navigate) to search for jobs specifically on LinkedIn, Monster, and Dice. "
+            "Analyze results and extract structured jobs. Only return jobs that are recently posted and match the C2C criteria or where C2C/Corp-to-Corp is "
             "explicitly mentioned or very likely. Highlight the C2C viability in the structured response. "
             "CRITICAL: You MUST output your final answer as valid JSON matching the schema provided. Do not return conversational markdown."
         )
     )
 
     prompt = (
-        f"Search for and compile a list of at least 5 to 10 C2C Data Engineer job postings matching "
-        f"the query '{query}'. Actively search across major portals like LinkedIn, Indeed, Monster, Dice, "
-        f"and other tech job boards. Use targeted search queries like 'C2C Data Engineer site:linkedin.com', "
-        f"'Corp-to-Corp Data Engineer site:indeed.com', 'Contract Data Engineer C2C site:monster.com', "
-        f"or 'Data Engineer C2C site:dice.com'. Filter out jobs that are strictly W2 or do not allow contract terms. "
+        f"Search for and compile a list of as many C2C Data Engineer job postings as possible (aim for at least 20 to 30) matching "
+        f"the query '{query}'. Actively search specifically across LinkedIn, Monster, and Dice. "
+        f"Ensure that you ONLY include jobs that were recently posted (e.g., within the last 7 to 14 days). "
+        f"Use targeted search queries like 'C2C Data Engineer site:linkedin.com', "
+        f"'Contract Data Engineer C2C site:monster.com', or 'Data Engineer C2C site:dice.com'. "
+        f"Filter out jobs that are strictly W2 or do not allow contract terms. "
         f"\n\nCRITICAL: When you are done, you MUST return the final list of jobs as ONLY a valid JSON object wrapped in ```json ... ``` blocks. "
         f"The JSON object must have a single key 'jobs' containing a list of job objects. Each job object must match this schema:\n"
         f"{json.dumps(JobList.model_json_schema())}\n"
