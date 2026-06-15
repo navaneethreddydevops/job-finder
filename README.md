@@ -10,7 +10,7 @@ A full-stack, Claude-powered dashboard that scours web portals for Corp-to-Corp 
 * **No volume cap**: Pulls as many matching C2C roles as it can find.
 * **Built-in web tooling**: Scouts search and read job boards using Claude's built-in `WebSearch` and `WebFetch` tools — no MCP servers required.
 * **Live thought console**: Streams agent reasoning and tool calls to the browser over Server-Sent Events.
-* **Sleek React Dashboard**: A dark-mode, glassmorphism web UI with statistics, search, multi-selection filters (C2C viability, Remote vs Onsite, Job Sources, Applied), and a details drawer.
+* **Notion-inspired React Dashboard**: A clean, editorial light UI (serif display headings, hairline borders, soft shadows, Notion-style tag colors) with statistics, search, multi-selection filters (C2C viability, Remote vs Onsite, Job Sources, Applied), and a details drawer. See the redesign spec in [app_spec.md](app_spec.md) (Task 4).
 * **Authentication**: Email/password login & registration (8+ char passwords), profile editing, and password change. Seeded test user `test@test.com` / `testtest`.
 * **Resume Optimizer** (`/resume/optimizer`): Split-pane tool — paste a job description, drop in your existing Word resume (previewed in-browser), and Claude generates a tailored, downloadable `.docx`. Includes a progress bar and refresh-safe persisted state.
 * **Unified Server**: Serves the static production React build directly from the Python backend (with SPA fallback for client-side routes).

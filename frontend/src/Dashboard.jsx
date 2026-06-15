@@ -615,7 +615,7 @@ function Dashboard() {
         </div>
 
         {activeAgentTool && (
-          <div className="logo-badge" style={{ background: 'linear-gradient(135deg, var(--accent), var(--danger))', display: 'flex', alignItems: 'center', gap: '0.4rem', animation: 'pulse-slow 1s infinite' }}>
+          <div className="logo-badge" style={{ background: 'var(--accent)', color: '#fff', border: 'none', display: 'flex', alignItems: 'center', gap: '0.4rem', animation: 'pulse-slow 1.4s infinite' }}>
             <Cpu size={12} />
             <span>Agent Active: {activeAgentTool}</span>
           </div>

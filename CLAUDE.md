@@ -224,3 +224,11 @@ handling ad hoc.
   job dashboard, and `pages/` holds Login, Register, Profile, and ResumeOptimizer. The
   dashboard also registers **WebMCP** tools (`document.modelContext`) so an in-browser agent
   can drive it.
+- **Design system — Notion-inspired light theme.** All styling lives in
+  `frontend/src/index.css` as the single source of truth, driven by `:root` CSS custom
+  properties (`--primary`, `--text-*`, `--border`, `--*-glow`, …) and semantic class names
+  shared across every page; component JSX references these tokens (incl. inline styles), so
+  re-theme by editing the variables/classes rather than the components. Fonts (Inter UI + Lora
+  serif display + JetBrains Mono) load via CDN in `frontend/index.html`. Keep it light, flat,
+  and restrained (hairlines, soft shadows, small radii). When changing the look, update
+  `app_spec.md` Task 4 and keep element `id`s intact (WebMCP/agent tooling depends on them).

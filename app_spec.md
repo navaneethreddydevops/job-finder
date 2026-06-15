@@ -169,6 +169,54 @@ Follow-up requirements:
 
 ---
 
+## Task 4 — Notion-style UI redesign (award-winning UI/UX)
+
+Goal: replace the dark "glassmorphism" theme with a clean, editorial, **Notion.com-inspired**
+light interface across the entire app, raising visual quality to a polished, award-worthy
+standard while changing **no behavior, routes, data flow, WebMCP tooling, or APIs**.
+
+### Design language (what "looks like Notion" means here)
+- **Light, paper-like canvas.** White background (`#ffffff`), subtle off-white surfaces
+  (`#f7f6f3`) for hovers/sidebars, no gradients-on-the-page, no glow.
+- **Notion ink palette.** Primary text `#37352f`, secondary/muted are alpha tints of it.
+  Hairline borders `rgba(55,53,47,0.09)`. Accent blue `#2383e2` used sparingly.
+- **Editorial type.** A serif display face (**Lora**) for headings/titles/numbers to evoke the
+  Notion.com marketing site; **Inter** for body/UI; a monospace face for the agent console
+  (rendered as a Notion-style code block, not a neon terminal).
+- **Restraint over flash.** Small radii (6–10px), 1px hairlines, very soft shadows
+  (`rgba(15,15,15,.05/.1)`), quiet hover states (background tint + ~1px lift), reduced
+  animation. Colored "tag" chips use Notion's pastel tag colors (light fill + readable text).
+- **Accessibility.** Respect `prefers-reduced-motion`; maintain AA contrast on the light theme.
+
+### Implementation steps (single source of truth — follow in order)
+1. **Tokens.** Rewrite the CSS custom properties in `frontend/src/index.css` (`:root`) to the
+   Notion light palette **keeping the existing variable names** (`--primary`, `--success`,
+   `--border`, `--text-*`, `--*-glow`, …) so the inline styles in the JSX adopt the new theme
+   with **no component edits**.
+2. **Fonts.** In `frontend/index.html`, load **Inter + Lora + a monospace** (replacing
+   Outfit/Fira-only) and set `--font-sans`/`--font-heading`/`--font-mono` accordingly. Update
+   the document `<title>`.
+3. **Global canvas.** Remove the body radial-gradient glows; set the light canvas; keep the
+   centered `max-width` container.
+4. **Chrome.** Restyle header, stat cards, sidebar/controls, filter chips, buttons (primary =
+   solid Notion blue; secondary = hairline) to the flat light system.
+5. **Job list + modal.** Restyle job cards (hairline, quiet hover), badges (Notion tag colors),
+   the native `<dialog>` details modal (white card, soft popover shadow, subtle backdrop).
+6. **Agent console.** Re-skin the SSE log console as a **light code block** (off-white bg,
+   monospace) with readable syntax colors for tool/thought/system/error log classes.
+7. **Auth / Profile / Resume Optimizer.** These reuse the shared classes
+   (`auth-card`, `sidebar-panel`, `input-text`, `resume-*`, `docx-host`), so they inherit the
+   new look; only verify contrast and the docx "paper" preview still reads correctly.
+8. **Verify.** Build the frontend (`npm run build`) and load via the preview workflow; confirm
+   each route renders, the agent console + modal look correct, and no regression in behavior.
+
+Scope guardrail: this task is **CSS + fonts only**. Class names, element structure, `id`s
+(used by WebMCP/agent tooling), state, and endpoints are unchanged.
+
+---
+
 ## Dependencies added
 - **Python:** `python-docx` (docx parse/generate).
 - **JS:** `react-router-dom` (routing), `docx-preview` (render .docx in browser).
+- **Fonts (CDN):** Inter (UI), Lora (serif display), monospace for the console — loaded in
+  `frontend/index.html`; no new npm packages.
