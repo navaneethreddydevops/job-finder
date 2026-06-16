@@ -149,6 +149,17 @@ def extract_text_from_docx(data: bytes) -> str:
     return "\n".join(lines).strip()
 
 
+# Leading bullet glyphs/markers a line might already carry (from the original resume
+# text). They must be stripped before applying a real "List Bullet" style, otherwise
+# the document shows a double bullet (the style's bullet + the literal glyph).
+_BULLET_PREFIX = re.compile(r"^\s*[•‣◦⁃∙·\*\-–—o]\s+")
+
+
+def strip_bullet(text: str) -> str:
+    """Remove a single leading bullet glyph/marker from a line of text."""
+    return _BULLET_PREFIX.sub("", (text or "").strip(), count=1).strip()
+
+
 def content_to_markdown(content: dict) -> str:
     """Derive a simple markdown form (used for preview/fallback)."""
     lines = []
@@ -161,7 +172,7 @@ def content_to_markdown(content: dict) -> str:
         if title:
             lines.append(f"## {title}")
         for item in section.get("items", []):
-            text = (item.get("text") or "").strip()
+            text = strip_bullet(item.get("text") or "")
             if text:
                 lines.append(f"- {text}")
     return "\n".join(lines)
@@ -200,7 +211,7 @@ def build_docx_from_content(content: dict) -> bytes:
         if title:
             doc.add_heading(title, level=1)
         for item in sec.get("items", []):
-            text = (item.get("text") or "").strip()
+            text = strip_bullet(item.get("text") or "")
             if text:
                 doc.add_paragraph(text, style="List Bullet")
 
@@ -220,7 +231,16 @@ def _parse_content(text: str) -> dict:
     raw = match.group(1) if match else text
     data = json.loads(raw)
     # Coerce/validate via the pydantic model so the shape is guaranteed.
-    return ResumeContent(**data).model_dump()
+    return sanitize_content(ResumeContent(**data).model_dump())
+
+
+def sanitize_content(content: dict) -> dict:
+    """Strip any leading bullet glyph each item already carries, so neither the
+    structured editor nor the generated .docx ends up with a double bullet."""
+    for section in content.get("sections", []):
+        for item in section.get("items", []):
+            item["text"] = strip_bullet(item.get("text") or "")
+    return content
 
 
 async def _optimize_with_claude(job_description: str, resume_text: str) -> tuple[dict, bytes | None]:
@@ -295,7 +315,7 @@ async def _optimize_with_claude(job_description: str, resume_text: str) -> tuple
                     break
 
         content = (
-            ResumeContent(**structured).model_dump()
+            sanitize_content(ResumeContent(**structured).model_dump())
             if structured
             else _parse_content(result_text)
         )
@@ -431,7 +451,7 @@ async def save_content(
     row = _get_job(user["id"])
     if row is None:
         raise HTTPException(status_code=404, detail="No resume job to update.")
-    data = content.model_dump()
+    data = sanitize_content(content.model_dump())
     markdown = content_to_markdown(data)
     docx_bytes = build_docx_from_content(data)
     _set_job(

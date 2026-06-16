@@ -15,53 +15,100 @@ import {
   Layers,
   CheckCircle2,
   Cpu,
-  FileText
+  FileText,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  Clock,
 } from 'lucide-react';
 import UserMenu from './components/UserMenu.jsx';
+import { useToast } from './components/Toast.jsx';
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+function timeAgo(isoStr) {
+  if (!isoStr) return null;
+  const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
+  if (diff < 10) return 'just now';
+  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return null;
+}
+
+function useCountUp(target, duration = 500) {
+  const [val, setVal] = useState(0);
+  const prevRef = useRef(0);
+  useEffect(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setVal(target); prevRef.current = target; return;
+    }
+    const from = prevRef.current;
+    const diff = target - from;
+    if (diff === 0) return;
+    const start = performance.now();
+    const raf = (now) => {
+      const p = Math.min((now - start) / duration, 1);
+      setVal(Math.round(from + diff * p));
+      if (p < 1) requestAnimationFrame(raf);
+      else prevRef.current = target;
+    };
+    requestAnimationFrame(raf);
+  }, [target, duration]);
+  return val;
+}
+
+function AnimatedNumber({ value }) {
+  const display = useCountUp(value);
+  return <>{display}</>;
+}
+
+// ── component ─────────────────────────────────────────────────────────────────
 
 function Dashboard() {
+  const { addToast } = useToast();
+
   const [jobs, setJobs] = useState([]);
+  const [jobsLoading, setJobsLoading] = useState(true);
   const [status, setStatus] = useState({ status: 'idle', query: null });
   const [query, setQuery] = useState('Senior Data Engineer');
   const [logs, setLogs] = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
   const [activeAgentTool, setActiveAgentTool] = useState(null);
   const [healthStatus, setHealthStatus] = useState('unknown');
-  
-  // Filters
+
+  // filters
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedC2C, setSelectedC2C] = useState('All');
   const [selectedSource, setSelectedSource] = useState('All');
   const [selectedLocation, setSelectedLocation] = useState('All');
   const [selectedApplied, setSelectedApplied] = useState('All');
 
+  // UI state
   const [currentPage, setCurrentPage] = useState(1);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [consoleOpen, setConsoleOpen] = useState(false);
+  const [agentStartTime, setAgentStartTime] = useState(null);
+  const [elapsed, setElapsed] = useState('');
+  const [onboardingDismissed, setOnboardingDismissed] = useState(
+    () => localStorage.getItem('jf_onboarded') === '1'
+  );
+
   const JOBS_PER_PAGE = 12;
 
   const consoleEndRef = useRef(null);
   const eventSourceRef = useRef(null);
   const dialogRef = useRef(null);
+  const lastFocusRef = useRef(null);
   const stateRef = useRef({});
-  
-  // Create a mutable ref holding all reactive state variables.
-  // This lets the WebMCP tools access fresh state without trigger re-registrations.
+
   stateRef.current = {
-    jobs,
-    filteredJobs: [], // will be populated in render / memo
-    query,
-    status,
-    logs,
-    searchTerm,
-    selectedC2C,
-    selectedLocation,
-    selectedSource,
-    selectedApplied,
-    selectedJob
+    jobs, filteredJobs: [],
+    query, status, logs, searchTerm,
+    selectedC2C, selectedLocation, selectedSource, selectedApplied, selectedJob,
   };
 
-  // Only surface fresh jobs: posted on the run date / within the last 24 hours.
-  // Trust the backend's structured flag first, then fall back to parsing the
-  // free-text date_posted ("3 hours ago", "today", "1 day ago", ...).
+  // ── 24h freshness filter ────────────────────────────────────────────────────
   const isWithin24h = (job) => {
     if (job.posted_within_24h) return true;
     const d = (job.date_posted || '').toLowerCase();
@@ -72,16 +119,22 @@ function Dashboard() {
     return false;
   };
 
-  // Fetch jobs list (filtered to the last 24 hours)
-  const fetchJobs = async () => {
+  // ── data fetching ───────────────────────────────────────────────────────────
+  const fetchJobs = async (showToast = false) => {
+    setJobsLoading(true);
     try {
       const resp = await fetch('/api/jobs');
       if (resp.ok) {
         const data = await resp.json();
-        setJobs((data.jobs || []).filter(isWithin24h));
+        const fresh = (data.jobs || []).filter(isWithin24h);
+        setJobs(fresh);
+        if (fresh.length > 0) setFilterOpen(true);
+        if (showToast) addToast('Database synced', 'success');
       }
     } catch (err) {
-      console.error("Failed to fetch jobs:", err);
+      console.error('Failed to fetch jobs:', err);
+    } finally {
+      setJobsLoading(false);
     }
   };
 
@@ -91,108 +144,84 @@ function Dashboard() {
       const resp = await fetch(`/api/jobs/${jobId}/apply`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ applied: newApplied })
+        body: JSON.stringify({ applied: newApplied }),
       });
       if (resp.ok) {
-        setJobs(prevJobs => prevJobs.map(job => 
-          job.id === jobId ? { ...job, applied: newApplied } : job
-        ));
-        if (stateRef.current.selectedJob && stateRef.current.selectedJob.id === jobId) {
+        setJobs(prev => prev.map(j => j.id === jobId ? { ...j, applied: newApplied } : j));
+        if (stateRef.current.selectedJob?.id === jobId) {
           setSelectedJob(prev => ({ ...prev, applied: newApplied }));
         }
+        addToast(newApplied ? 'Marked as applied' : 'Removed applied status', 'success');
       } else {
-        console.error("Failed to update applied status");
+        addToast('Failed to update status', 'error');
       }
     } catch (err) {
-      console.error("Error toggling applied status:", err);
+      addToast('Failed to update status', 'error');
+      console.error('Error toggling applied status:', err);
     }
   };
 
-  // Fetch backend agent status
   const fetchStatus = async () => {
     try {
       const resp = await fetch('/api/status');
-      if (resp.ok) {
-        const data = await resp.json();
-        setStatus(data);
-      }
+      if (resp.ok) setStatus(await resp.json());
     } catch (err) {
-      console.error("Failed to fetch status:", err);
+      console.error('Failed to fetch status:', err);
     }
   };
 
-  // SSE streaming listener
   const startStreaming = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
-
-    const eventSource = new EventSource('/api/stream');
-    eventSourceRef.current = eventSource;
-
-    eventSource.onmessage = (event) => {
+    if (eventSourceRef.current) eventSourceRef.current.close();
+    const es = new EventSource('/api/stream');
+    eventSourceRef.current = es;
+    es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        setLogs((prev) => [...prev, data.message]);
-        // Refresh the jobs list as soon as the backend reports a DB write, so the
-        // dashboard reflects new jobs without waiting on the status poll.
+        setLogs(prev => [...prev, data.message]);
         if (typeof data.message === 'string' && data.message.includes('Database now holds')) {
           fetchJobs();
         }
-      } catch (err) {
-        console.error("Failed to parse log message:", err);
-      }
+      } catch (err) { console.error('Failed to parse log message:', err); }
     };
-
-    eventSource.onerror = () => {
-      console.log("SSE Connection closed or encountered error, closing stream.");
-      eventSource.close();
-    };
+    es.onerror = () => { console.log('SSE closed'); es.close(); };
   };
 
-  // Trigger job pulling (FastAPI agent backend)
   const handlePullJobs = async (e) => {
     e.preventDefault();
-    
-    // Get query value directly from form in case React state hasn't updated (agent submissions)
     const formData = new FormData(e.currentTarget || e.target);
     const queryValue = formData.get('query')?.toString() || query;
-
     if (!queryValue.trim()) return;
-
     setQuery(queryValue);
 
     const runPromise = (async () => {
       try {
-        setLogs([]); // Clear previous logs
+        setLogs([]);
         const resp = await fetch('/api/pull', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: queryValue })
+          body: JSON.stringify({ query: queryValue }),
         });
-        
         if (resp.ok) {
           setStatus({ status: 'running', query: queryValue });
+          setAgentStartTime(performance.now());
+          setConsoleOpen(true);
           startStreaming();
           return `Successfully started backend job pull for query: "${queryValue}"`;
         } else {
           const errorData = await resp.json();
-          const errText = errorData.detail || "Failed to trigger job pull.";
-          if (!e.agentInvoked) alert(errText);
+          const errText = errorData.detail || 'Failed to trigger job pull.';
+          if (!e.agentInvoked) addToast(errText, 'error');
           return `Error triggering agent: ${errText}`;
         }
       } catch (err) {
-        console.error("Error triggering job pull:", err);
+        addToast('Network error', 'error');
         return `Network error: ${err.message}`;
       }
     })();
 
-    if (e.agentInvoked && typeof e.respondWith === 'function') {
-      e.respondWith(runPromise);
-    }
+    if (e.agentInvoked && typeof e.respondWith === 'function') e.respondWith(runPromise);
   };
 
-  // Handle local filter form submission (WebMCP agent submissions)
   const handleFilterFormSubmit = (e) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget || e.target);
@@ -203,45 +232,34 @@ function Dashboard() {
     }
   };
 
-  // Initial load
+  // ── effects ─────────────────────────────────────────────────────────────────
+
   useEffect(() => {
     fetchJobs();
     fetchStatus();
-
-    return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-    };
+    return () => { if (eventSourceRef.current) eventSourceRef.current.close(); };
   }, []);
 
-  // Poll backend health status
+  // health check
   useEffect(() => {
-    const checkHealth = async () => {
+    const check = async () => {
       try {
         const resp = await fetch('/api/health');
-        if (resp.ok) {
-          setHealthStatus('ok');
-        } else {
-          setHealthStatus('error');
-        }
-      } catch {
-        setHealthStatus('error');
-      }
+        setHealthStatus(resp.ok ? 'ok' : 'error');
+      } catch { setHealthStatus('error'); }
     };
-    checkHealth();
-    const interval = setInterval(checkHealth, 5000);
+    check();
+    const interval = setInterval(check, 5000);
     return () => clearInterval(interval);
   }, []);
 
-  // Poll status when agent is running
+  // status polling while running
   useEffect(() => {
     let interval;
     if (status.status === 'running') {
       if (!eventSourceRef.current || eventSourceRef.current.readyState === EventSource.CLOSED) {
         startStreaming();
       }
-      
       interval = setInterval(async () => {
         try {
           const resp = await fetch('/api/status');
@@ -251,468 +269,355 @@ function Dashboard() {
             if (data.status === 'idle') {
               clearInterval(interval);
               fetchJobs();
-              if (eventSourceRef.current) {
-                eventSourceRef.current.close();
-              }
+              if (eventSourceRef.current) eventSourceRef.current.close();
             }
           }
-        } catch (err) {
-          console.error("Failed polling status:", err);
-        }
+        } catch (err) { console.error('Failed polling status:', err); }
       }, 3000);
     }
     return () => clearInterval(interval);
   }, [status.status]);
 
-  // Auto-scroll terminal console
+  // auto-scroll console
   useEffect(() => {
-    if (consoleEndRef.current) {
+    if (consoleOpen && consoleEndRef.current) {
       consoleEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [logs]);
+  }, [logs, consoleOpen]);
 
-  // Compute available sources dynamically from actual data
-  const sources = useMemo(() => {
-    const list = new Set();
-    jobs.forEach(job => {
-      if (job.source) list.add(job.source);
-    });
-    return ['All', ...Array.from(list)];
-  }, [jobs]);
-
-  // Filtered jobs list
-  const filteredJobs = useMemo(() => {
-    return jobs.filter(job => {
-      const searchLower = searchTerm.toLowerCase();
-      const matchesSearch = 
-        job.title.toLowerCase().includes(searchLower) ||
-        job.company.toLowerCase().includes(searchLower) ||
-        job.description.toLowerCase().includes(searchLower) ||
-        job.key_requirements.some(req => req.toLowerCase().includes(searchLower));
-      
-      let matchesC2C = true;
-      if (selectedC2C !== 'All') {
-        matchesC2C = job.c2c_viability === selectedC2C;
-      }
-
-      let matchesSource = true;
-      if (selectedSource !== 'All') {
-        matchesSource = job.source === selectedSource;
-      }
-
-      let matchesLocation = true;
-      if (selectedLocation !== 'All') {
-        const isRemote = job.location.toLowerCase().includes('remote');
-        if (selectedLocation === 'Remote') {
-          matchesLocation = isRemote;
-        } else if (selectedLocation === 'Onsite/Hybrid') {
-          matchesLocation = !isRemote;
-        }
-      }
-
-      let matchesApplied = true;
-      if (selectedApplied !== 'All') {
-        matchesApplied = selectedApplied === 'Applied' ? job.applied : !job.applied;
-      }
-
-      return matchesSearch && matchesC2C && matchesSource && matchesLocation && matchesApplied;
-    });
-  }, [jobs, searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied]);
-
-  // Reset pagination when filters change
+  // elapsed timer
   useEffect(() => {
-    setCurrentPage(1);
-  }, [searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied]);
+    if (status.status !== 'running') { setElapsed(''); return; }
+    const interval = setInterval(() => {
+      if (!agentStartTime) return;
+      const secs = Math.floor((performance.now() - agentStartTime) / 1000);
+      const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+      const ss = String(secs % 60).padStart(2, '0');
+      setElapsed(`${mm}:${ss}`);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [status.status, agentStartTime]);
 
-  const totalPages = Math.ceil(filteredJobs.length / JOBS_PER_PAGE);
-  const paginatedJobs = filteredJobs.slice((currentPage - 1) * JOBS_PER_PAGE, currentPage * JOBS_PER_PAGE);
+  // '/' keyboard shortcut focuses search
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
+        e.preventDefault();
+        document.getElementById('local-search-input')?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
-  // Push filtered list to stateRef so WebMCP tools retrieve the correct indexes
-  stateRef.current.filteredJobs = filteredJobs;
-
-  // Sync native dialog overlay
+  // dialog open/close + focus return
   useEffect(() => {
     if (selectedJob) {
       dialogRef.current?.showModal();
     } else {
       dialogRef.current?.close();
+      setTimeout(() => lastFocusRef.current?.focus(), 50);
     }
   }, [selectedJob]);
 
-  // Stats Computations
-  const stats = useMemo(() => {
-    const total = jobs.length;
-    const confirmedC2C = jobs.filter(j => j.c2c_viability === 'Confirmed C2C').length;
-    const remote = jobs.filter(j => j.location.toLowerCase().includes('remote')).length;
-    const applied = jobs.filter(j => j.applied).length;
-    return { total, confirmedC2C, remote, applied };
+  // ── derived values ──────────────────────────────────────────────────────────
+
+  const sources = useMemo(() => {
+    const list = new Set();
+    jobs.forEach(j => { if (j.source) list.add(j.source); });
+    return ['All', ...Array.from(list)];
   }, [jobs]);
 
-  // WebMCP Imperative API registration
+  const filteredJobs = useMemo(() => {
+    return jobs.filter(job => {
+      const sl = searchTerm.toLowerCase();
+      const matchesSearch = !sl ||
+        job.title.toLowerCase().includes(sl) ||
+        job.company.toLowerCase().includes(sl) ||
+        job.description.toLowerCase().includes(sl) ||
+        job.key_requirements.some(r => r.toLowerCase().includes(sl));
+      const matchesC2C = selectedC2C === 'All' || job.c2c_viability === selectedC2C;
+      const matchesSource = selectedSource === 'All' || job.source === selectedSource;
+      const isRemote = job.location.toLowerCase().includes('remote');
+      const matchesLocation = selectedLocation === 'All' ||
+        (selectedLocation === 'Remote' ? isRemote : !isRemote);
+      const matchesApplied = selectedApplied === 'All' ||
+        (selectedApplied === 'Applied' ? job.applied : !job.applied);
+      return matchesSearch && matchesC2C && matchesSource && matchesLocation && matchesApplied;
+    });
+  }, [jobs, searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied]);
+
+  useEffect(() => { setCurrentPage(1); },
+    [searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied]);
+
+  stateRef.current.filteredJobs = filteredJobs;
+
+  const totalPages = Math.ceil(filteredJobs.length / JOBS_PER_PAGE);
+  const paginatedJobs = filteredJobs.slice((currentPage - 1) * JOBS_PER_PAGE, currentPage * JOBS_PER_PAGE);
+
+  const stats = useMemo(() => ({
+    total: jobs.length,
+    confirmedC2C: jobs.filter(j => j.c2c_viability === 'Confirmed C2C').length,
+    remote: jobs.filter(j => j.location.toLowerCase().includes('remote')).length,
+    applied: jobs.filter(j => j.applied).length,
+  }), [jobs]);
+
+  const lastUpdated = useMemo(() => {
+    const dates = jobs.map(j => j.created_at).filter(Boolean).sort();
+    return dates.length ? timeAgo(dates[dates.length - 1]) : null;
+  }, [jobs]);
+
+  const activeFilterCount = [selectedC2C, selectedLocation, selectedSource, selectedApplied]
+    .filter(v => v !== 'All').length;
+
+  const clearAllFilters = () => {
+    setSelectedC2C('All'); setSelectedLocation('All');
+    setSelectedSource('All'); setSelectedApplied('All');
+    setSearchTerm('');
+  };
+
+  // ── WebMCP tool registration ────────────────────────────────────────────────
   useEffect(() => {
     const modelContext = document.modelContext || navigator.modelContext;
     if (modelContext && typeof modelContext.registerTool === 'function') {
       const controller = new AbortController();
       const signal = controller.signal;
-
       try {
-        // Tool 1: Get jobs list
         modelContext.registerTool({
-          name: "get_jobs_list",
-          description: "Retrieve all jobs matching the current search parameters and filters in the dashboard.",
-          inputSchema: {
-            type: "object",
-            properties: {}
-          },
+          name: 'get_jobs_list',
+          description: 'Retrieve all jobs matching the current search parameters and filters in the dashboard.',
+          inputSchema: { type: 'object', properties: {} },
           execute() {
-            const current = stateRef.current;
+            const cur = stateRef.current;
             return {
-              total_database_count: current.jobs.length,
-              filtered_display_count: current.filteredJobs.length,
-              active_filters: {
-                searchTerm: current.searchTerm,
-                c2cViability: current.selectedC2C,
-                location: current.selectedLocation,
-                source: current.selectedSource,
-                applied: current.selectedApplied
-              },
-              jobs: current.filteredJobs.map((j, idx) => ({
-                index: idx,
-                id: j.id,
-                title: j.title,
-                company: j.company,
-                location: j.location,
-                c2c_viability: j.c2c_viability,
-                source: j.source,
-                applied: j.applied,
-                key_requirements: j.key_requirements
-              }))
+              total_database_count: cur.jobs.length,
+              filtered_display_count: cur.filteredJobs.length,
+              active_filters: { searchTerm: cur.searchTerm, c2cViability: cur.selectedC2C, location: cur.selectedLocation, source: cur.selectedSource, applied: cur.selectedApplied },
+              jobs: cur.filteredJobs.map((j, idx) => ({ index: idx, id: j.id, title: j.title, company: j.company, location: j.location, c2c_viability: j.c2c_viability, source: j.source, applied: j.applied, key_requirements: j.key_requirements })),
             };
           },
-          annotations: { readOnlyHint: true }
+          annotations: { readOnlyHint: true },
         }, { signal });
 
-        // Tool 2: Filter display list
         modelContext.registerTool({
-          name: "filter_jobs",
-          description: "Apply text search and filter selections in the dashboard viewport.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              searchTerm: { type: "string", description: "Search query for title, company or skills" },
-              c2cViability: { type: "string", enum: ["All", "Confirmed C2C", "Likely C2C", "Not Specified"], description: "C2C confidence filter" },
-              location: { type: "string", enum: ["All", "Remote", "Onsite/Hybrid"], description: "Location type filter" },
-              source: { type: "string", description: "Source portal filter" },
-              applied: { type: "string", enum: ["All", "Applied", "Not Applied"], description: "Applied status filter" }
-            }
-          },
+          name: 'filter_jobs',
+          description: 'Apply text search and filter selections in the dashboard viewport.',
+          inputSchema: { type: 'object', properties: { searchTerm: { type: 'string' }, c2cViability: { type: 'string', enum: ['All', 'Confirmed C2C', 'Likely C2C', 'Not Specified'] }, location: { type: 'string', enum: ['All', 'Remote', 'Onsite/Hybrid'] }, source: { type: 'string' }, applied: { type: 'string', enum: ['All', 'Applied', 'Not Applied'] } } },
           execute(input) {
             if (input.searchTerm !== undefined) setSearchTerm(input.searchTerm);
             if (input.c2cViability !== undefined) setSelectedC2C(input.c2cViability);
             if (input.location !== undefined) setSelectedLocation(input.location);
             if (input.source !== undefined) setSelectedSource(input.source);
             if (input.applied !== undefined) setSelectedApplied(input.applied);
-            return {
-              success: true,
-              message: "Dashboard viewport filters applied successfully"
-            };
-          }
+            return { success: true, message: 'Dashboard viewport filters applied successfully' };
+          },
         }, { signal });
 
-        // Tool 3: View job description modal
         modelContext.registerTool({
-          name: "view_job_details",
-          description: "Open the details drawer modal for a job using its list index.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              index: { type: "integer", description: "0-based index of the job in the current filtered jobs list" }
-            },
-            required: ["index"]
-          },
+          name: 'view_job_details',
+          description: 'Open the details drawer modal for a job using its list index.',
+          inputSchema: { type: 'object', properties: { index: { type: 'integer' } }, required: ['index'] },
           execute(input) {
-            const current = stateRef.current;
-            if (input.index >= 0 && input.index < current.filteredJobs.length) {
-              const job = current.filteredJobs[input.index];
+            const cur = stateRef.current;
+            if (input.index >= 0 && input.index < cur.filteredJobs.length) {
+              const job = cur.filteredJobs[input.index];
               setSelectedJob(job);
-              return {
-                success: true,
-                message: `Opened job details for "${job.title}" at "${job.company}"`,
-                job: job
-              };
+              return { success: true, message: `Opened job details for "${job.title}" at "${job.company}"`, job };
             }
-            return {
-              success: false,
-              error: `Invalid index: ${input.index}. List bounds are 0 to ${current.filteredJobs.length - 1}`
-            };
-          }
+            return { success: false, error: `Invalid index: ${input.index}. Bounds 0–${cur.filteredJobs.length - 1}` };
+          },
         }, { signal });
 
-        // Tool 4: Trigger backend crawler agent
         modelContext.registerTool({
-          name: "trigger_agent_run",
-          description: "Trigger the backend scraping agent to run a live job crawl with the specified query.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              query: { type: "string", description: "The scraper query (e.g. 'C2C Data Engineer')" }
-            },
-            required: ["query"]
-          },
+          name: 'trigger_agent_run',
+          description: 'Trigger the backend scraping agent to run a live job crawl with the specified query.',
+          inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
           async execute(input) {
             const q = input.query.trim();
-            if (!q) {
-              return { success: false, error: "Search query string is required" };
-            }
-            setQuery(q);
-            setLogs([]);
+            if (!q) return { success: false, error: 'Search query required' };
+            setQuery(q); setLogs([]);
             try {
-              const resp = await fetch('/api/pull', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: q })
-              });
-              
-              if (resp.ok) {
-                setStatus({ status: 'running', query: q });
-                startStreaming();
-                return {
-                  success: true,
-                  message: `Job search scraper successfully initiated for '${q}'`
-                };
-              } else {
-                const errorData = await resp.json();
-                return {
-                  success: false,
-                  error: errorData.detail || "Scraper call failed"
-                };
-              }
-            } catch (err) {
-              return { success: false, error: err.message };
-            }
-          }
+              const resp = await fetch('/api/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: q }) });
+              if (resp.ok) { setStatus({ status: 'running', query: q }); setAgentStartTime(performance.now()); setConsoleOpen(true); startStreaming(); return { success: true, message: `Scraper initiated for '${q}'` }; }
+              const e = await resp.json();
+              return { success: false, error: e.detail || 'Scraper call failed' };
+            } catch (err) { return { success: false, error: err.message }; }
+          },
         }, { signal });
 
-        // Tool 5: Toggle applied status
         modelContext.registerTool({
-          name: "toggle_job_applied",
-          description: "Toggle the applied status of a job posting.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              jobId: { type: "integer", description: "The unique database ID of the job" },
-              applied: { type: "boolean", description: "Whether the job should be marked as applied" }
-            },
-            required: ["jobId", "applied"]
-          },
+          name: 'toggle_job_applied',
+          description: 'Toggle the applied status of a job posting.',
+          inputSchema: { type: 'object', properties: { jobId: { type: 'integer' }, applied: { type: 'boolean' } }, required: ['jobId', 'applied'] },
           async execute(input) {
             try {
-              const resp = await fetch(`/api/jobs/${input.jobId}/apply`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ applied: input.applied })
-              });
+              const resp = await fetch(`/api/jobs/${input.jobId}/apply`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ applied: input.applied }) });
               if (resp.ok) {
-                setJobs(prevJobs => prevJobs.map(job => 
-                  job.id === input.jobId ? { ...job, applied: input.applied } : job
-                ));
-                if (stateRef.current.selectedJob && stateRef.current.selectedJob.id === input.jobId) {
-                  setSelectedJob(prev => ({ ...prev, applied: input.applied }));
-                }
-                return {
-                  success: true,
-                  message: `Successfully set applied=${input.applied} for job ID ${input.jobId}`
-                };
-              } else {
-                return { success: false, error: "Failed to update applied status on backend" };
+                setJobs(prev => prev.map(j => j.id === input.jobId ? { ...j, applied: input.applied } : j));
+                if (stateRef.current.selectedJob?.id === input.jobId) setSelectedJob(prev => ({ ...prev, applied: input.applied }));
+                return { success: true, message: `Set applied=${input.applied} for job ${input.jobId}` };
               }
-            } catch (err) {
-              return { success: false, error: err.message };
-            }
-          }
+              return { success: false, error: 'Failed to update on backend' };
+            } catch (err) { return { success: false, error: err.message }; }
+          },
         }, { signal });
 
-        // Tool 6: Clear database
         modelContext.registerTool({
-          name: "clear_database",
-          description: "Reset and clear the current jobs database list in the UI.",
-          inputSchema: {
-            type: "object",
-            properties: {}
-          },
+          name: 'clear_database',
+          description: 'Reset and clear the current jobs database list in the UI.',
+          inputSchema: { type: 'object', properties: {} },
           async execute() {
             try {
               const resp = await fetch('/api/jobs/clear', { method: 'POST' });
-              if (resp.ok) {
-                setJobs([]);
-                setSelectedJob(null);
-                return {
-                  success: true,
-                  message: "Local jobs database has been cleared."
-                };
-              } else {
-                return { success: false, error: "Failed to clear database on backend" };
-              }
-            } catch (err) {
-              return { success: false, error: err.message };
-            }
-          }
+              if (resp.ok) { setJobs([]); setSelectedJob(null); return { success: true, message: 'Local jobs database cleared.' }; }
+              return { success: false, error: 'Failed to clear on backend' };
+            } catch (err) { return { success: false, error: err.message }; }
+          },
         }, { signal });
-
-      } catch (err) {
-        console.warn("Failed to register WebMCP tool:", err);
-      }
-
-      return () => {
-        controller.abort();
-      };
+      } catch (err) { console.warn('Failed to register WebMCP tool:', err); }
+      return () => controller.abort();
     }
-  }, [sources]); // Recalculate only if sources list changes
+  }, [sources]);
 
-  // WebMCP Interaction event hook handlers
   useEffect(() => {
-    const handleActivated = (e) => {
-      const toolName = e.toolName || e.detail?.toolName || "WebMCP Tool";
-      setActiveAgentTool(toolName);
-    };
-    const handleCancel = () => {
-      setActiveAgentTool(null);
-    };
-
+    const handleActivated = (e) => setActiveAgentTool(e.toolName || e.detail?.toolName || 'WebMCP Tool');
+    const handleCancel = () => setActiveAgentTool(null);
     window.addEventListener('toolactivated', handleActivated);
     window.addEventListener('toolcancel', handleCancel);
-    return () => {
-      window.removeEventListener('toolactivated', handleActivated);
-      window.removeEventListener('toolcancel', handleCancel);
-    };
+    return () => { window.removeEventListener('toolactivated', handleActivated); window.removeEventListener('toolcancel', handleCancel); };
   }, []);
 
-  // Format log strings for terminal
+  // ── log formatter ───────────────────────────────────────────────────────────
   const formatLog = (logText) => {
-    if (logText.startsWith('[Tool Call]')) {
-      return <span className="log-tool">{logText}</span>;
-    } else if (logText.startsWith('[Tool Complete]') || logText.startsWith('[Backend]')) {
-      return <span className="log-system">{logText}</span>;
-    } else if (logText.startsWith('[Backend Error]') || logText.startsWith('Error:')) {
-      return <span className="log-error">{logText}</span>;
-    } else {
-      return <span className="log-thought">{logText}</span>;
-    }
+    if (logText.startsWith('[Tool Call]')) return <span className="log-tool">{logText}</span>;
+    if (logText.startsWith('[Tool Complete]') || logText.startsWith('[Backend]')) return <span className="log-system">{logText}</span>;
+    if (logText.startsWith('[Backend Error]') || logText.startsWith('Error:')) return <span className="log-error">{logText}</span>;
+    return <span className="log-thought">{logText}</span>;
   };
 
+  // ── copy log ────────────────────────────────────────────────────────────────
+  const copyLog = (e) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(logs.join('\n')).then(() => addToast('Log copied to clipboard', 'success'));
+  };
+
+  // ── render ──────────────────────────────────────────────────────────────────
   return (
     <div className="app-container" id="app-root-container">
-      {/* Header */}
+
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
       <header className="app-header" id="dashboard-header">
         <div className="logo-section">
           <Briefcase className="logo-icon" size={28} />
-          <div>
-            <span className="logo-text">Job Finder</span>
-          </div>
+          <span className="logo-text">Job Finder</span>
         </div>
 
         {activeAgentTool && (
-          <div className="logo-badge" style={{ background: 'var(--accent)', color: '#fff', border: 'none', display: 'flex', alignItems: 'center', gap: '0.4rem', animation: 'pulse-slow 1.4s infinite' }}>
+          <div className="logo-badge agent-active-badge">
             <Cpu size={12} />
-            <span>Agent Active: {activeAgentTool}</span>
+            <span>Agent: {activeAgentTool}</span>
           </div>
         )}
 
-        <div className="header-actions">
-          <Link to="/resume/optimizer" className="btn" title="Resume Optimizer">
+        <div className="header-actions" style={{ alignItems: 'flex-end' }}>
+          {/* nav link — styled differently from action buttons */}
+          <Link to="/resume/optimizer" className="btn nav-link" title="Resume Optimizer">
             <FileText size={16} />
-            Resume Optimizer
+            <span className="header-btn-label">Resume Optimizer</span>
           </Link>
+
           <button
             id="sync-db-btn"
             className={`btn ${status.status === 'running' ? 'disabled' : ''}`}
-            onClick={fetchJobs}
+            onClick={() => fetchJobs(true)}
             disabled={status.status === 'running'}
             title="Refresh current local database"
           >
             <RefreshCw size={16} className={status.status === 'running' ? 'spin' : ''} />
-            Sync Database
+            <span className="header-btn-label">Sync</span>
           </button>
 
-          {/* Backend Health Badge */}
-          <div className="logo-badge" style={{
-            background: healthStatus === 'ok' ? 'rgba(16, 185, 129, 0.2)' : healthStatus === 'error' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(107, 114, 128, 0.2)',
-            color: healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--text-muted)',
-            display: 'flex', alignItems: 'center', gap: '0.4rem', border: `1px solid ${healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--border)'}`
-          }}>
-            <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: healthStatus === 'ok' ? 'var(--success)' : healthStatus === 'error' ? 'var(--danger)' : 'var(--text-muted)' }}></div>
-            <span>Backend: {healthStatus === 'ok' ? 'Online' : healthStatus === 'error' ? 'Offline' : 'Checking...'}</span>
+          {/* health pill stacked above the user profile */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.4rem' }}>
+            <div className={`health-pill ${healthStatus}`} title={`Backend ${healthStatus === 'ok' ? 'online' : healthStatus === 'error' ? 'offline' : 'checking'}`}>
+              <div className="health-dot" />
+              <span>{healthStatus === 'ok' ? 'Online' : healthStatus === 'error' ? 'Offline' : '…'}</span>
+            </div>
+            <UserMenu />
           </div>
-
-          <UserMenu />
         </div>
       </header>
 
-      {/* Stats Cards */}
-      <section className="stats-grid" id="stats-summary-panel" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-        <div className="stat-card" id="stat-card-total">
-          <div className="stat-icon-wrapper primary">
-            <Layers size={22} />
-          </div>
+      {/* ── Stats Cards ────────────────────────────────────────────────────── */}
+      <section className="stats-grid" id="stats-summary-panel">
+        <div className="stat-card" id="stat-card-total" title="Total unique job postings fetched within the last 24 hours">
+          <div className="stat-icon-wrapper primary"><Layers size={22} /></div>
           <div className="stat-info">
             <span className="stat-label">Total Jobs Found</span>
-            <span className="stat-value">{stats.total}</span>
+            <span className="stat-value"><AnimatedNumber value={stats.total} /></span>
           </div>
         </div>
-        <div className="stat-card" id="stat-card-confirmed">
-          <div className="stat-icon-wrapper success">
-            <CheckCircle2 size={22} />
-          </div>
+        <div className="stat-card" id="stat-card-confirmed" title="Jobs explicitly confirmed as Corp-to-Corp eligible">
+          <div className="stat-icon-wrapper success"><CheckCircle2 size={22} /></div>
           <div className="stat-info">
             <span className="stat-label">Confirmed C2C</span>
-            <span className="stat-value">{stats.confirmedC2C}</span>
+            <span className="stat-value"><AnimatedNumber value={stats.confirmedC2C} /></span>
           </div>
         </div>
-        <div className="stat-card" id="stat-card-remote">
-          <div className="stat-icon-wrapper warning">
-            <Sparkles size={22} />
-          </div>
+        <div className="stat-card" id="stat-card-remote" title="Jobs listed as fully remote">
+          <div className="stat-icon-wrapper warning"><Sparkles size={22} /></div>
           <div className="stat-info">
             <span className="stat-label">Remote Roles</span>
-            <span className="stat-value">{stats.remote}</span>
+            <span className="stat-value"><AnimatedNumber value={stats.remote} /></span>
           </div>
         </div>
-        <div className="stat-card" id="stat-card-applied">
-          <div className="stat-icon-wrapper success" style={{ color: 'var(--success)', backgroundColor: 'var(--success-glow)', borderColor: 'rgba(16, 185, 129, 0.2)' }}>
+        <div className="stat-card" id="stat-card-applied" title="Jobs you've marked as applied">
+          <div className={`stat-icon-wrapper ${stats.applied > 0 ? 'success' : ''}`}>
             <CheckCircle2 size={22} />
           </div>
           <div className="stat-info">
             <span className="stat-label">Applied Jobs</span>
-            <span className="stat-value">{stats.applied}</span>
+            <span className={`stat-value ${stats.applied > 0 ? 'stat-value-success' : ''}`}>
+              <AnimatedNumber value={stats.applied} />
+            </span>
           </div>
         </div>
       </section>
 
-      {/* Main Grid: Controls + Content */}
-      <div className={`dashboard-grid ${status.status === 'running' || logs.length > 0 ? 'with-console' : ''}`}>
-        
-        {/* Controls Sidebar */}
+      {/* last-updated line */}
+      {lastUpdated && (
+        <div className="stat-updated">
+          <Clock size={12} />
+          Updated {lastUpdated}
+        </div>
+      )}
+
+      {/* ── Main Grid ──────────────────────────────────────────────────────── */}
+      <div className="dashboard-grid">
+
+        {/* ── Sidebar ──────────────────────────────────────────────────────── */}
         <aside className="sidebar-panel" id="agent-controls-panel">
           <div className="sidebar-title">
             <Sparkles size={18} className="text-primary" />
             Agent Controls
           </div>
-          
-          {/* Declarative WebMCP Form for Triggering Backend Scraper Agent */}
-          <form 
+
+          {/* — Section 1: Run Agent — */}
+          <span className="sidebar-section-label">Run Agent</span>
+          <form
             id="agent-run-form"
-            onSubmit={handlePullJobs} 
+            onSubmit={handlePullJobs}
             className="control-group"
             toolname="trigger_agent_run_form"
             tooldescription="Trigger a backend web scraper agent run to search for C2C job postings matching a specified search query"
             toolautosubmit
           >
             <label htmlFor="agent-query-input" className="control-label">Search Target</label>
-            <input 
+            <input
               id="agent-query-input"
               name="query"
-              type="text" 
-              className="input-text" 
+              type="text"
+              className="input-text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="e.g. C2C Data Engineer"
@@ -720,272 +625,375 @@ function Dashboard() {
               toolparamdescription="The search query for C2C jobs, for example 'C2C Data Engineer' or 'Corp-to-Corp Data Architect'"
               required
             />
-            <button 
+            <button
               id="trigger-agent-btn"
-              type="submit" 
+              type="submit"
               className="btn btn-primary"
               disabled={status.status === 'running' || !query.trim()}
               style={{ marginTop: '0.5rem' }}
             >
               <RefreshCw size={16} className={status.status === 'running' ? 'spin' : ''} />
-              {status.status === 'running' ? 'Agent Pulling...' : 'Trigger Agent Run'}
+              {status.status === 'running' ? 'Agent Running…' : 'Trigger Agent Run'}
             </button>
           </form>
 
-          {/* Active Logs Console */}
+          {/* — Collapsible Agent Console — */}
           {(status.status === 'running' || logs.length > 0) && (
             <div className="agent-console-panel" id="active-logs-console">
-              <div className="console-header">
+              <div className="console-header" onClick={() => setConsoleOpen(v => !v)} style={{ cursor: 'pointer' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                   <Terminal size={14} />
-                  Agent Thought Console
+                  Agent Log
+                  {status.status === 'running' && elapsed && (
+                    <span className="console-elapsed">— {elapsed}</span>
+                  )}
                 </div>
-                {status.status === 'running' && <span className="logo-badge" style={{ animation: 'pulse-slow 1s infinite' }}>live</span>}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                  {status.status === 'running' && (
+                    <span className="logo-badge" style={{ animation: 'pulse-slow 1s infinite' }}>live</span>
+                  )}
+                  {logs.length > 0 && (
+                    <button
+                      className="btn btn-sm console-copy-btn"
+                      onClick={copyLog}
+                      title="Copy log to clipboard"
+                    >
+                      <Copy size={12} />
+                    </button>
+                  )}
+                  {consoleOpen ? <ChevronUp size={14} className="text-muted" /> : <ChevronDown size={14} className="text-muted" />}
+                </div>
               </div>
-              <div className="console-body">
-                {logs.map((log, index) => (
-                  <span key={index} className="console-log-text">
-                    {formatLog(log)}
-                  </span>
-                ))}
-                {status.status === 'running' && (
-                  <span className="console-log-text log-system" style={{ borderLeft: '2px solid var(--accent)', paddingLeft: '4px', animation: 'pulse-slow 1s infinite' }}>
-                    Agent is processing... ▋
-                  </span>
-                )}
-                <div ref={consoleEndRef} />
-              </div>
+              {consoleOpen && (
+                <div className="console-body">
+                  {logs.map((log, i) => (
+                    <span key={i} className="console-log-text">{formatLog(log)}</span>
+                  ))}
+                  {status.status === 'running' && (
+                    <span className="console-log-text log-system" style={{ borderLeft: '2px solid var(--accent)', paddingLeft: '4px', animation: 'pulse-slow 1s infinite' }}>
+                      Agent is processing… ▋
+                    </span>
+                  )}
+                  <div ref={consoleEndRef} />
+                </div>
+              )}
             </div>
           )}
 
-          {/* Filters Section */}
-          <div className="sidebar-panel" id="filters-panel" style={{ border: 'none', padding: '0', boxShadow: 'none' }}>
-            <div className="control-group" style={{ borderTop: '1px solid var(--border)', paddingTop: '1.25rem' }}>
-              <span className="control-label">Application Status</span>
-              <div className="filter-pills">
-                {['All', 'Applied', 'Not Applied'].map((appliedOption) => (
-                  <button
-                    key={appliedOption}
-                    id={`filter-applied-${appliedOption.replace(/\s+/g, '-').toLowerCase()}`}
-                    className={`filter-pill ${selectedApplied === appliedOption ? 'active' : ''}`}
-                    onClick={() => setSelectedApplied(appliedOption)}
-                  >
-                    {appliedOption}
-                  </button>
-                ))}
-              </div>
+          {/* — Section 2: Filter Results (collapsible) — */}
+          <div
+            className={`filter-section-header ${filterOpen ? 'open' : ''}`}
+            onClick={() => setFilterOpen(v => !v)}
+            style={{ borderTop: '1px solid var(--border)', paddingTop: '1rem' }}
+          >
+            <span>
+              Filter Results
+              {activeFilterCount > 0 && (
+                <span className="filter-count-badge">{activeFilterCount}</span>
+              )}
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              {activeFilterCount > 0 && (
+                <button
+                  className="clear-filters-link"
+                  onClick={(e) => { e.stopPropagation(); clearAllFilters(); }}
+                >
+                  Clear
+                </button>
+              )}
+              {filterOpen ? <ChevronUp size={14} className="text-muted" /> : <ChevronDown size={14} className="text-muted" />}
             </div>
+          </div>
 
-            <div className="control-group" style={{ marginTop: '1rem' }}>
-              <span className="control-label">C2C Viability</span>
-              <div className="filter-pills">
-                {['All', 'Confirmed C2C', 'Likely C2C', 'Not Specified'].map((c2cOption) => (
-                  <button
-                    key={c2cOption}
-                    id={`filter-c2c-${c2cOption.replace(/\s+/g, '-').toLowerCase()}`}
-                    className={`filter-pill ${selectedC2C === c2cOption ? 'active' : ''}`}
-                    onClick={() => setSelectedC2C(c2cOption)}
-                  >
-                    {c2cOption}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="control-group" style={{ marginTop: '1rem' }}>
-              <span className="control-label">Location Type</span>
-              <div className="filter-pills">
-                {['All', 'Remote', 'Onsite/Hybrid'].map((locOption) => (
-                  <button
-                    key={locOption}
-                    id={`filter-location-${locOption.replace(/\//g, '-').toLowerCase()}`}
-                    className={`filter-pill ${selectedLocation === locOption ? 'active' : ''}`}
-                    onClick={() => setSelectedLocation(locOption)}
-                  >
-                    {locOption}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {sources.length > 1 && (
-              <div className="control-group" style={{ marginTop: '1rem' }}>
-                <span className="control-label">Job Source</span>
+          {filterOpen && (
+            <div id="filters-panel" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <div className="control-group">
+                <span className="control-label">Application Status</span>
                 <div className="filter-pills">
-                  {sources.map((srcOption) => (
+                  {['All', 'Applied', 'Not Applied'].map((opt) => (
                     <button
-                      key={srcOption}
-                      id={`filter-source-${srcOption.replace(/\s+/g, '-').toLowerCase()}`}
-                      className={`filter-pill ${selectedSource === srcOption ? 'active' : ''}`}
-                      onClick={() => setSelectedSource(srcOption)}
+                      key={opt}
+                      id={`filter-applied-${opt.replace(/\s+/g, '-').toLowerCase()}`}
+                      className={`filter-pill ${selectedApplied === opt ? 'active' : ''}`}
+                      onClick={() => setSelectedApplied(opt)}
                     >
-                      {srcOption}
+                      {opt}
                     </button>
                   ))}
                 </div>
               </div>
-            )}
-          </div>
+
+              <div className="control-group">
+                <span className="control-label">C2C Viability</span>
+                <div className="filter-pills">
+                  {['All', 'Confirmed C2C', 'Likely C2C', 'Not Specified'].map((opt) => (
+                    <button
+                      key={opt}
+                      id={`filter-c2c-${opt.replace(/\s+/g, '-').toLowerCase()}`}
+                      className={`filter-pill ${selectedC2C === opt ? 'active' : ''}`}
+                      onClick={() => setSelectedC2C(opt)}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="control-group">
+                <span className="control-label">Location Type</span>
+                <div className="filter-pills">
+                  {['All', 'Remote', 'Onsite/Hybrid'].map((opt) => (
+                    <button
+                      key={opt}
+                      id={`filter-location-${opt.replace(/\//g, '-').toLowerCase()}`}
+                      className={`filter-pill ${selectedLocation === opt ? 'active' : ''}`}
+                      onClick={() => setSelectedLocation(opt)}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {sources.length > 1 && (
+                <div className="control-group">
+                  <span className="control-label">Job Source</span>
+                  <div className="filter-pills">
+                    {sources.map((opt) => {
+                      const count = opt === 'All' ? jobs.length : jobs.filter(j => j.source === opt).length;
+                      return (
+                        <button
+                          key={opt}
+                          id={`filter-source-${opt.replace(/\s+/g, '-').toLowerCase()}`}
+                          className={`filter-pill ${selectedSource === opt ? 'active' : ''}`}
+                          onClick={() => setSelectedSource(opt)}
+                        >
+                          {opt}{opt !== 'All' && <span className="source-count"> ({count})</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </aside>
 
-        {/* Content Area */}
+        {/* ── Main Content ────────────────────────────────────────────────── */}
         <main className="main-content-panel" id="jobs-database-panel">
+
+          {/* Onboarding banner — only shown when DB is empty and not dismissed */}
+          {jobs.length === 0 && !jobsLoading && !onboardingDismissed && (
+            <div className="onboarding-banner">
+              <div className="onboarding-steps">
+                <div className="onboarding-step">
+                  <span className="onboarding-num">①</span>
+                  <div>
+                    <strong>Enter a search target</strong>
+                    <p>Type your desired role in the sidebar</p>
+                  </div>
+                </div>
+                <span className="onboarding-arrow">→</span>
+                <div className="onboarding-step">
+                  <span className="onboarding-num">②</span>
+                  <div>
+                    <strong>Trigger Agent Run</strong>
+                    <p>The AI agent scours job boards</p>
+                  </div>
+                </div>
+                <span className="onboarding-arrow">→</span>
+                <div className="onboarding-step">
+                  <span className="onboarding-num">③</span>
+                  <div>
+                    <strong>View live results</strong>
+                    <p>Jobs stream in as they're found</p>
+                  </div>
+                </div>
+              </div>
+              <button
+                className="onboarding-dismiss"
+                onClick={() => { localStorage.setItem('jf_onboarded', '1'); setOnboardingDismissed(true); }}
+                aria-label="Dismiss onboarding"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
+
+          {/* Panel header with search and active filter tags */}
           <div className="panel-header">
-            <h2 className="panel-title">Jobs Database ({filteredJobs.length} visible)</h2>
-            
-            {/* Declarative WebMCP Form for Filtering/Searching local job results */}
-            <form 
+            <h2 className="panel-title">
+              Jobs Database
+              <span className="panel-title-count"> ({filteredJobs.length} visible)</span>
+            </h2>
+
+            <form
               id="filter-form"
-              onSubmit={handleFilterFormSubmit} 
+              onSubmit={handleFilterFormSubmit}
               style={{ position: 'relative', width: '260px' }}
               toolname="search_jobs_form"
               tooldescription="Search and filter the currently loaded jobs in the local dashboard UI"
               toolautosubmit
             >
-              <input 
+              <input
                 id="local-search-input"
                 name="searchTerm"
-                type="text" 
-                className="input-text" 
-                style={{ paddingLeft: '2.25rem' }}
+                type="text"
+                className="input-text"
+                style={{ paddingLeft: '2.25rem', paddingRight: '2.5rem' }}
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search jobs..."
+                placeholder="Search jobs… (/)"
                 toolparamdescription="Text query to search within titles, companies, or requirements"
               />
-              <Search 
-                size={16} 
-                className="text-muted" 
-                style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)' }} 
-              />
+              <Search size={16} className="text-muted" style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
             </form>
           </div>
 
-          {/* Job List Container */}
-          {filteredJobs.length > 0 ? (
+          {/* Active filter tags */}
+          {activeFilterCount > 0 && (
+            <div className="active-filter-tags">
+              {selectedApplied !== 'All' && (
+                <span className="active-filter-tag">
+                  {selectedApplied}
+                  <button onClick={() => setSelectedApplied('All')} aria-label="Remove applied filter"><X size={10} /></button>
+                </span>
+              )}
+              {selectedC2C !== 'All' && (
+                <span className="active-filter-tag">
+                  {selectedC2C}
+                  <button onClick={() => setSelectedC2C('All')} aria-label="Remove C2C filter"><X size={10} /></button>
+                </span>
+              )}
+              {selectedLocation !== 'All' && (
+                <span className="active-filter-tag">
+                  {selectedLocation}
+                  <button onClick={() => setSelectedLocation('All')} aria-label="Remove location filter"><X size={10} /></button>
+                </span>
+              )}
+              {selectedSource !== 'All' && (
+                <span className="active-filter-tag">
+                  {selectedSource}
+                  <button onClick={() => setSelectedSource('All')} aria-label="Remove source filter"><X size={10} /></button>
+                </span>
+              )}
+              <button className="clear-filters-link" onClick={clearAllFilters}>Clear all</button>
+            </div>
+          )}
+
+          {/* Job list — skeleton / results / empty state */}
+          {jobsLoading ? (
+            <div className="jobs-grid" id="jobs-grid">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="job-card skeleton-card">
+                  <div className="skeleton skeleton-title" />
+                  <div className="skeleton skeleton-line" />
+                  <div className="skeleton skeleton-line short" />
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <div className="skeleton skeleton-badge" />
+                    <div className="skeleton skeleton-badge" />
+                  </div>
+                  <div className="skeleton skeleton-text" />
+                </div>
+              ))}
+            </div>
+          ) : filteredJobs.length > 0 ? (
             <>
               <div className="jobs-grid" id="jobs-grid">
                 {paginatedJobs.map((job, localIdx) => {
                   const absoluteIdx = (currentPage - 1) * JOBS_PER_PAGE + localIdx;
                   return (
-                  <div 
-                    key={job.id || absoluteIdx} 
-                    id={`job-card-${absoluteIdx}`}
-                    className={`job-card ${job.applied ? 'applied' : ''}`}
-                    onClick={() => setSelectedJob(job)}
-                  >
-                    <div className="job-card-header">
-                      <div style={{ flex: 1 }}>
-                        <h3 className="job-title">{job.title}</h3>
-                        <span className="job-company">{job.company}</span>
+                    <div
+                      key={job.id || absoluteIdx}
+                      id={`job-card-${absoluteIdx}`}
+                      className={`job-card ${job.applied ? 'applied' : ''}`}
+                      onClick={(e) => { lastFocusRef.current = e.currentTarget; setSelectedJob(job); }}
+                      tabIndex={0}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); lastFocusRef.current = e.currentTarget; setSelectedJob(job); } }}
+                    >
+                      <div className="job-card-header">
+                        <div style={{ flex: 1 }}>
+                          <h3 className="job-title">{job.title}</h3>
+                          <span className="job-company">{job.company}</span>
+                        </div>
+                        <button
+                          className={`btn-toggle-applied ${job.applied ? 'applied' : ''}`}
+                          onClick={(e) => { e.stopPropagation(); handleToggleApplied(job.id, job.applied); }}
+                          title={job.applied ? 'Mark as Not Applied' : 'Mark as Applied'}
+                          style={{ background: 'transparent', border: 'none', color: job.applied ? 'var(--success)' : 'var(--text-muted)', cursor: 'pointer', padding: '0.25rem', display: 'flex', alignItems: 'center', marginTop: '-0.25rem', marginRight: '-0.25rem' }}
+                        >
+                          <CheckCircle2 size={18} fill={job.applied ? 'var(--success-glow)' : 'transparent'} />
+                        </button>
                       </div>
-                      <button
-                        className={`btn-toggle-applied ${job.applied ? 'applied' : ''}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleToggleApplied(job.id, job.applied);
-                        }}
-                        title={job.applied ? "Mark as Not Applied" : "Mark as Applied"}
-                        style={{
-                          background: 'transparent',
-                          border: 'none',
-                          color: job.applied ? 'var(--success)' : 'var(--text-muted)',
-                          cursor: 'pointer',
-                          padding: '0.25rem',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          marginTop: '-0.25rem',
-                          marginRight: '-0.25rem'
-                        }}
-                      >
-                        <CheckCircle2 size={18} fill={job.applied ? 'var(--success-glow)' : 'transparent'} />
-                      </button>
-                    </div>
 
-                    <div className="job-meta-row">
-                      <span className="job-meta-item">
-                        <MapPin size={12} />
-                        {job.location}
-                      </span>
-                      <span className="job-meta-item">
-                        <Calendar size={12} />
-                        {job.date_posted}
-                      </span>
-                    </div>
+                      <div className="job-meta-row">
+                        <span className="job-meta-item"><MapPin size={12} />{job.location}</span>
+                        <span className="job-meta-item"><Calendar size={12} />{job.date_posted}</span>
+                      </div>
 
-                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                      <span className={`badge ${
-                        job.c2c_viability === 'Confirmed C2C' ? 'badge-c2c-confirmed' :
-                        job.c2c_viability === 'Likely C2C' ? 'badge-c2c-likely' : 'badge-c2c-unknown'
-                      }`}>
-                        {job.c2c_viability}
-                      </span>
-                      <span className="badge badge-source">
-                        {job.source}
-                      </span>
-                      {job.applied && (
-                        <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(16, 185, 129, 0.2)', textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
-                          <CheckCircle2 size={10} />
-                          Applied
+                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <span className={`badge ${job.c2c_viability === 'Confirmed C2C' ? 'badge-c2c-confirmed' : job.c2c_viability === 'Likely C2C' ? 'badge-c2c-likely' : 'badge-c2c-unknown'}`}>
+                          {job.c2c_viability}
                         </span>
-                      )}
-                    </div>
+                        <span className="badge badge-source">{job.source}</span>
+                        {job.applied && (
+                          <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(42,126,79,0.2)', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
+                            <CheckCircle2 size={10} /> Applied
+                          </span>
+                        )}
+                      </div>
 
-                    <p className="job-desc-preview">{job.description}</p>
+                      <p className="job-desc-preview">{job.description}</p>
 
-                    <div className="job-requirements">
-                      {job.key_requirements.slice(0, 4).map((req, rIdx) => (
-                        <span key={rIdx} className="requirement-tag">{req}</span>
-                      ))}
-                      {job.key_requirements.length > 4 && (
-                        <span className="requirement-tag">+{job.key_requirements.length - 4} more</span>
-                      )}
+                      <div className="job-requirements">
+                        {job.key_requirements.slice(0, 4).map((req, rIdx) => (
+                          <span key={rIdx} className="requirement-tag">{req}</span>
+                        ))}
+                        {job.key_requirements.length > 4 && (
+                          <span className="requirement-tag">+{job.key_requirements.length - 4} more</span>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                )})}
+                  );
+                })}
               </div>
-              
-              {/* Pagination Controls */}
+
               {totalPages > 1 && (
                 <div className="pagination-container">
-                  <button 
-                    className="btn btn-pagination" 
-                    disabled={currentPage === 1}
-                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                  >
-                    Previous
+                  <button className="btn btn-pagination" disabled={currentPage === 1} onClick={() => setCurrentPage(p => Math.max(1, p - 1))}>
+                    ← Prev
                   </button>
-                  <span className="pagination-info">Page {currentPage} of {totalPages}</span>
-                  <button 
-                    className="btn btn-pagination" 
-                    disabled={currentPage === totalPages}
-                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                  >
-                    Next
+                  <span className="pagination-info">Page {currentPage} of {totalPages} · {filteredJobs.length} jobs</span>
+                  <button className="btn btn-pagination" disabled={currentPage === totalPages} onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}>
+                    Next →
                   </button>
                 </div>
               )}
             </>
           ) : (
             <div className="empty-state" id="empty-state-view">
-              <Briefcase size={48} className="empty-state-icon" />
-              <h3 className="empty-state-title">No Jobs Found</h3>
+              <Briefcase size={40} className="empty-state-icon" />
+              <h3 className="empty-state-title">
+                {jobs.length === 0 ? 'No Jobs Found' : 'No Matching Jobs'}
+              </h3>
               <p className="empty-state-desc">
-                {jobs.length === 0 
-                  ? "The local database is empty. Provide a search query and trigger the Antigravity Agent to scour the web for Corp-to-Corp positions."
-                  : "No jobs in the local database match your active search terms and filters."
-                }
+                {jobs.length === 0
+                  ? 'Enter a search target and trigger the agent to scour job boards for Corp-to-Corp positions.'
+                  : 'No jobs match your active filters.'}
               </p>
-              {jobs.length === 0 && (
-                <button 
+              {jobs.length === 0 ? (
+                <button
                   id="empty-state-default-btn"
                   className="btn btn-primary"
-                  onClick={() => setQuery('Senior Data Engineer')}
+                  onClick={() => { setQuery('Senior Data Engineer'); document.getElementById('agent-query-input')?.focus(); }}
                   disabled={status.status === 'running'}
                   style={{ marginTop: '0.5rem' }}
                 >
-                  Use Default Query
+                  Start your first search →
+                </button>
+              ) : (
+                <button className="btn" onClick={clearAllFilters} style={{ marginTop: '0.5rem' }}>
+                  Clear filters
                 </button>
               )}
             </div>
@@ -993,24 +1001,25 @@ function Dashboard() {
         </main>
       </div>
 
-      {/* Accessible Native HTML5 Dialog for Job details */}
-      <dialog 
-        ref={dialogRef} 
+      {/* ── Job Details Dialog ─────────────────────────────────────────────── */}
+      <dialog
+        ref={dialogRef}
         className="job-details-dialog"
         onClose={() => setSelectedJob(null)}
         id="job-details-dialog"
+        onKeyDown={(e) => { if (e.key === 'Escape') setSelectedJob(null); }}
       >
         {selectedJob && (
           <>
-            <button 
+            <button
               id="close-modal-btn"
-              className="modal-close-btn" 
+              className="modal-close-btn"
               onClick={() => setSelectedJob(null)}
               aria-label="Close details dialog"
             >
               <X size={20} />
             </button>
-            
+
             <div className="modal-header">
               <h2 className="modal-job-title">{selectedJob.title}</h2>
               <div className="modal-company-section">
@@ -1021,76 +1030,49 @@ function Dashboard() {
                   {selectedJob.location}
                 </span>
               </div>
-              
               <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                <span className={`badge ${
-                  selectedJob.c2c_viability === 'Confirmed C2C' ? 'badge-c2c-confirmed' :
-                  selectedJob.c2c_viability === 'Likely C2C' ? 'badge-c2c-likely' : 'badge-c2c-unknown'
-                }`}>
+                <span className={`badge ${selectedJob.c2c_viability === 'Confirmed C2C' ? 'badge-c2c-confirmed' : selectedJob.c2c_viability === 'Likely C2C' ? 'badge-c2c-likely' : 'badge-c2c-unknown'}`}>
                   {selectedJob.c2c_viability}
                 </span>
-                <span className="badge badge-source">
-                  {selectedJob.source}
-                </span>
+                <span className="badge badge-source">{selectedJob.source}</span>
                 <span className="badge badge-c2c-unknown" style={{ textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
-                  <Calendar size={11} />
-                  Found: {selectedJob.date_posted}
+                  <Calendar size={11} />Found: {selectedJob.date_posted}
                 </span>
                 {selectedJob.applied && (
-                  <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(16, 185, 129, 0.2)', textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
-                    <CheckCircle2 size={11} />
-                    Applied
+                  <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(42,126,79,0.2)', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
+                    <CheckCircle2 size={11} />Applied
                   </span>
                 )}
               </div>
             </div>
 
             <div className="modal-body">
-              {/* Contact Info (if available) */}
               {(selectedJob.contact_email || selectedJob.contact_phone || selectedJob.url) && (
                 <div className="modal-section" id="modal-section-contact">
                   <span className="modal-section-title">Application & Contact</span>
-                  <div className="contact-row" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <div className="contact-row">
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem' }}>
                       {selectedJob.contact_email && (
-                        <div className="contact-item">
-                          <Mail size={14} />
-                          Email: <a href={`mailto:${selectedJob.contact_email}`}>{selectedJob.contact_email}</a>
-                        </div>
+                        <div className="contact-item"><Mail size={14} />Email: <a href={`mailto:${selectedJob.contact_email}`}>{selectedJob.contact_email}</a></div>
                       )}
                       {selectedJob.contact_phone && (
-                        <div className="contact-item">
-                          <Phone size={14} />
-                          Phone: {selectedJob.contact_phone}
-                        </div>
+                        <div className="contact-item"><Phone size={14} />Phone: {selectedJob.contact_phone}</div>
                       )}
                       {selectedJob.url && (
-                        <div className="contact-item">
-                          <LinkIcon size={14} />
-                          <a href={selectedJob.url} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
-                            View Original Posting
-                            <Sparkles size={11} />
-                          </a>
-                        </div>
+                        <div className="contact-item"><LinkIcon size={14} /><a href={selectedJob.url} target="_blank" rel="noopener noreferrer">View Original Posting</a></div>
                       )}
                     </div>
-
                     <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
                       {selectedJob.url && (
-                        <a 
-                          href={selectedJob.url} 
-                          target="_blank" 
-                          rel="noopener noreferrer" 
+                        <a
+                          href={selectedJob.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
                           className="btn btn-primary"
-                          onClick={() => {
-                            if (!selectedJob.applied) {
-                              handleToggleApplied(selectedJob.id, selectedJob.applied);
-                            }
-                          }}
+                          onClick={() => { if (!selectedJob.applied) handleToggleApplied(selectedJob.id, selectedJob.applied); }}
                           style={{ textDecoration: 'none' }}
                         >
-                          <LinkIcon size={16} />
-                          Apply Now & Mark Applied
+                          <LinkIcon size={16} />Apply Now & Mark Applied
                         </a>
                       )}
                       <button
@@ -1098,31 +1080,23 @@ function Dashboard() {
                         onClick={() => handleToggleApplied(selectedJob.id, selectedJob.applied)}
                       >
                         <CheckCircle2 size={16} fill={selectedJob.applied ? 'var(--success-glow)' : 'transparent'} />
-                        {selectedJob.applied ? "Applied (Click to Undo)" : "Mark as Applied"}
+                        {selectedJob.applied ? 'Applied (Click to Undo)' : 'Mark as Applied'}
                       </button>
                     </div>
                   </div>
                 </div>
               )}
 
-              {/* Description */}
               <div className="modal-section" id="modal-section-description">
                 <span className="modal-section-title">Job Description & C2C Analysis</span>
                 <p className="modal-desc-text">{selectedJob.description}</p>
               </div>
 
-              {/* Requirements */}
               <div className="modal-section" id="modal-section-requirements">
                 <span className="modal-section-title">Required Technical Stack</span>
                 <div className="job-requirements" style={{ gap: '0.5rem', marginTop: '0.25rem' }}>
                   {selectedJob.key_requirements.map((req, idx) => (
-                    <span 
-                      key={idx} 
-                      className="requirement-tag"
-                      style={{ padding: '0.3rem 0.65rem', fontSize: '0.8rem' }}
-                    >
-                      {req}
-                    </span>
+                    <span key={idx} className="requirement-tag" style={{ padding: '0.3rem 0.65rem', fontSize: '0.8rem' }}>{req}</span>
                   ))}
                 </div>
               </div>

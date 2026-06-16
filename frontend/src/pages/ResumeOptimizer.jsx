@@ -2,10 +2,11 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { renderAsync } from 'docx-preview';
 import {
-  ArrowLeft, Upload, Sparkles, Download, FileText, Plus, Trash2, Save, Eye, Pencil,
+  ArrowLeft, Upload, Sparkles, Download, FileText, Plus, Trash2, Save, Eye, Pencil, CloudUpload, RotateCcw,
 } from 'lucide-react';
 import { apiFetch } from '../auth.jsx';
 import UserMenu from '../components/UserMenu.jsx';
+import { useToast } from '../components/Toast.jsx';
 
 const STATE_KEY = 'jf_resume_state';
 
@@ -21,6 +22,11 @@ function dataUrlToArrayBuffer(dataUrl) {
 const DOCX_OPTS = { className: 'docx', inWrapper: true, ignoreWidth: true, ignoreHeight: true };
 
 export default function ResumeOptimizer() {
+  const { addToast } = useToast();
+  const [dragOver, setDragOver] = useState(false);
+  const [optimizeStartTime, setOptimizeStartTime] = useState(null);
+  const [completedIn, setCompletedIn] = useState(null);
+
   const [jd, setJd] = useState('');
   const [fileName, setFileName] = useState('');
   const [fileDataUrl, setFileDataUrl] = useState('');
@@ -118,7 +124,13 @@ export default function ResumeOptimizer() {
         if (data.status !== 'running') {
           clearInterval(pollRef.current);
           pollRef.current = null;
-          if (data.status === 'done') loadResult();
+          if (data.status === 'done') {
+            loadResult();
+            if (optimizeStartTime) {
+              const secs = Math.round((Date.now() - optimizeStartTime) / 1000);
+              setCompletedIn(secs);
+            }
+          }
           if (data.status === 'error') setError(data.error || 'Generation failed.');
         }
       } catch { /* ignore */ }
@@ -148,12 +160,34 @@ export default function ResumeOptimizer() {
       }), fileName || 'resume.docx');
     }
     setContent(null);
+    setCompletedIn(null);
+    setOptimizeStartTime(Date.now());
     setStatus({ status: 'running', stage: 'Queued', progress: 5, error: '', has_result: false });
     try {
       const resp = await apiFetch('/api/resume/optimize', { method: 'POST', body: fd });
       if (!resp.ok) { const d = await resp.json().catch(() => ({})); throw new Error(d.detail || 'Failed to start.'); }
       startPolling();
     } catch (err) { setError(err.message); setStatus((s) => ({ ...s, status: 'error' })); }
+  };
+
+  // Clear everything — job description, uploaded resume, and the optimized result.
+  const resetAll = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    setJd('');
+    setFileName('');
+    setFileDataUrl('');
+    setContent(null);
+    setOriginalText('');
+    setOrigMode('preview');
+    setOptMode('edit');
+    setError('');
+    setCompletedIn(null);
+    setOptimizeStartTime(null);
+    setStatus({ status: 'idle', stage: '', progress: 0, error: '', has_result: false });
+    if (leftRef.current) leftRef.current.innerHTML = '';
+    if (rightRef.current) rightRef.current.innerHTML = '';
+    localStorage.removeItem(STATE_KEY);
+    addToast('Cleared', 'success');
   };
 
   // ---- structured-content editing helpers ----
@@ -185,7 +219,8 @@ export default function ResumeOptimizer() {
       if (!resp.ok) { const d = await resp.json().catch(() => ({})); throw new Error(d.detail || 'Save failed.'); }
       setStatus((s) => ({ ...s, has_result: true }));
       setSavedAt(Date.now());
-    } catch (err) { setError(err.message); }
+      addToast('Edits saved', 'success');
+    } catch (err) { setError(err.message); addToast('Save failed', 'error'); }
     finally { setSaving(false); }
   };
 
@@ -221,24 +256,27 @@ export default function ResumeOptimizer() {
 
       {/* Top chat window: job description + optimize */}
       <section className="resume-chat">
-        <label className="control-label">Job Description / Requirement</label>
+        <label className="control-label resume-step-label">
+          <span className="resume-step-num">①</span> Job Description / Requirement
+        </label>
         <textarea className="input-text resume-jd" value={jd} onChange={(e) => setJd(e.target.value)}
           placeholder="Paste the job description or list the requirements you want your resume tailored to…" />
         <div className="resume-chat-actions">
           <button className="btn btn-primary" onClick={optimize} disabled={running}>
             <Sparkles size={16} /> {running ? 'Optimizing…' : 'Optimize'}
           </button>
-          {content && (
-            <button className="btn" onClick={saveContent} disabled={saving}>
-              <Save size={16} /> {saving ? 'Saving…' : 'Save edits'}
-            </button>
-          )}
+          <button className="btn" onClick={resetAll} disabled={running} title="Clear the job description, resume, and result">
+            <RotateCcw size={16} /> Reset
+          </button>
         </div>
         {error && <div className="auth-error" style={{ marginTop: '0.75rem' }}>{error}</div>}
         {(running || status.progress > 0) && (
           <div className="resume-progress-wrap">
             <div className="resume-progress-bar"><div className="resume-progress-fill" style={{ width: `${status.progress}%` }} /></div>
-            <span className="resume-progress-label">{status.stage || 'Working'} — {status.progress}%</span>
+            <span className="resume-progress-label">
+              {status.stage || 'Working'} — {status.progress}%
+              {status.status === 'done' && completedIn && ` · Completed in ${completedIn}s`}
+            </span>
           </div>
         )}
       </section>
@@ -248,7 +286,7 @@ export default function ResumeOptimizer() {
         {/* LEFT — existing resume */}
         <div className="resume-pane">
           <div className="resume-pane-header">
-            <span>Existing Resume {fileName ? `· ${fileName}` : ''}</span>
+            <span className="resume-step-label"><span className="resume-step-num">②</span> Your Resume {fileName ? <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>· {fileName}</span> : ''}</span>
             <div className="resume-pane-tools">
               <button className={`btn btn-sm ${origMode === 'preview' ? 'active' : ''}`} onClick={() => setOrigMode('preview')} disabled={!fileDataUrl}><Eye size={13} /> Preview</button>
               <button className={`btn btn-sm ${origMode === 'edit' ? 'active' : ''}`} onClick={() => { if (!originalText && fileDataUrl) loadResult(); setOrigMode('edit'); }}><Pencil size={13} /> Edit</button>
@@ -263,9 +301,18 @@ export default function ResumeOptimizer() {
                 placeholder="Your existing resume text — edit freely, then click Optimize to re-tailor it." />
             </div>
           ) : (
-            <div className="resume-drop" onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onFile(e.dataTransfer.files?.[0]); }}>
+            <div
+              className={`resume-drop ${dragOver ? 'drag-over' : ''}`}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => { e.preventDefault(); setDragOver(false); onFile(e.dataTransfer.files?.[0]); }}
+            >
               {!fileDataUrl && (
-                <div className="resume-drop-hint"><Upload size={28} /><p>Drag & drop your Word resume here, or click Upload.</p></div>
+                <div className="resume-drop-hint">
+                  <CloudUpload size={36} style={{ opacity: 0.5 }} />
+                  <p style={{ fontWeight: 500 }}>Drop your .docx here</p>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>or click Upload above</p>
+                </div>
               )}
               <div ref={leftRef} className="docx-host" />
             </div>
@@ -275,13 +322,25 @@ export default function ResumeOptimizer() {
         {/* RIGHT — optimized result */}
         <div className="resume-pane">
           <div className="resume-pane-header">
-            <span>Optimized Result {newCount > 0 && <span className="diff-count">+{newCount} new</span>}</span>
+            <span className="resume-step-label">
+              <span className="resume-step-num">③</span> Optimized Result
+              {newCount > 0 && <span className="diff-count">+{newCount} new</span>}
+            </span>
             <div className="resume-pane-tools">
-              <button className={`btn btn-sm ${optMode === 'edit' ? 'active' : ''}`} onClick={() => setOptMode('edit')} disabled={!content}><Pencil size={13} /> Edit</button>
               <button className={`btn btn-sm ${optMode === 'preview' ? 'active' : ''}`} onClick={() => setOptMode('preview')} disabled={!status.has_result}><Eye size={13} /> Preview</button>
-              <button className="btn btn-sm btn-primary" onClick={downloadDocx} disabled={!status.has_result}><Download size={13} /> Download</button>
+              <button className={`btn btn-sm ${optMode === 'edit' ? 'active' : ''}`} onClick={() => setOptMode('edit')} disabled={!content}><Pencil size={13} /> Edit</button>
+              {content && (
+                <button className="btn btn-sm" onClick={saveContent} disabled={saving}><Save size={13} /> {saving ? 'Saving…' : 'Save edits'}</button>
+              )}
+              <button className="btn btn-sm btn-primary resume-download-btn" onClick={downloadDocx} disabled={!status.has_result}><Download size={13} /> Download</button>
             </div>
           </div>
+          {newCount > 0 && (
+            <div className="resume-diff-legend">
+              <span className="resume-legend-dot" />
+              Green items are new — tailored to the job description
+            </div>
+          )}
 
           {optMode === 'preview' ? (
             <div className="resume-drop result"><div ref={rightRef} className="docx-host" /></div>
