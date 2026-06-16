@@ -1,27 +1,72 @@
+version: '3.8'
+
 services:
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    container_name: job-finder-backend
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # Claude OAuth authentication — credentials loaded from ~/.claude volume
+      # The backend will use the authenticated claude CLI session, no API key needed
       - DATABASE_PATH=/data/jobs.db
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
     volumes:
+      # Persist jobs database across restarts
       - jobs-data:/data
-      - ~/.claude:/root/.claude
+      # Mount Claude credentials directory (created during setup)
+      # IMPORTANT: ~/.claude must contain valid Claude CLI authentication
+      - ${CLAUDE_CONFIG_DIR:-./.claude}:/root/.claude:ro
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      - db-ready
     restart: unless-stopped
+    networks:
+      - job-finder-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    container_name: job-finder-frontend
     ports:
-      - "5173:80"
+      - "${FRONTEND_PORT:-5173}:80"
     depends_on:
       - backend
     restart: unless-stopped
+    networks:
+      - job-finder-net
+    environment:
+      - VITE_API_URL=http://${API_HOST:-localhost}:${BACKEND_PORT:-8000}
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Dummy service to wait for volume mount validation
+  db-ready:
+    image: busybox:latest
+    container_name: job-finder-db-ready
+    volumes:
+      - jobs-data:/data
+    command: sh -c "mkdir -p /data && chmod 777 /data && echo 'Database volume ready'"
+    networks:
+      - job-finder-net
 
 volumes:
   jobs-data:
+    driver: local
+
+networks:
+  job-finder-net:
+    driver: bridge

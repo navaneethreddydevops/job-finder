@@ -89,6 +89,61 @@ If you wish to make live modifications to React code or styles:
 
 ---
 
+## Docker Setup (Recommended for Multi-Machine Deployment)
+
+Run Job Finder in Docker containers with proper Claude OAuth authentication:
+
+### Quick Start
+```bash
+# Run setup script (handles credentials, configuration)
+./docker-setup.sh              # macOS/Linux
+docker-setup.bat               # Windows
+
+# Build and start services
+docker compose build
+docker compose up -d
+
+# Access the application
+# Frontend:  http://localhost:5173
+# Backend:   http://localhost:8000
+```
+
+### Key Features
+- ✅ **Claude OAuth Authentication** — Uses `~/.claude` credentials, never API keys
+- ✅ **Cross-Machine Compatible** — Works on macOS, Linux, Windows
+- ✅ **Persistent Database** — Jobs saved in Docker volumes
+- ✅ **Service Health Checks** — Automatic restart on failure
+- ✅ **Hot Reload Support** — Use override file for development
+
+### Setup Details
+1. Ensure `claude login` has been run (creates `~/.claude`)
+2. Run `./docker-setup.sh` to validate and configure
+3. Edit `.env` if needed (ports, API host, etc.)
+4. Run `docker compose up -d`
+
+### Documentation
+- **Full Guide**: See [DOCKER.md](DOCKER.md) for detailed setup, troubleshooting, and production deployment
+- **Quick Reference**: See [DOCKER-QUICKREF.md](DOCKER-QUICKREF.md) for common commands
+- **Configuration**: See [.env.example](.env.example) for environment variables
+
+### Useful Commands
+```bash
+# View logs
+docker compose logs -f
+
+# Stop services
+docker compose down
+
+# Rebuild after code changes
+docker compose up -d --build
+
+# Access container shell
+docker compose exec backend bash
+```
+
+---
+
 ## Further Documentation
+* For Docker deployment and troubleshooting, see [DOCKER.md](DOCKER.md) and [DOCKER-QUICKREF.md](DOCKER-QUICKREF.md).
 * For agent design, tools, and the response schema, see [AGENTS.md](AGENTS.md).
 * For repo-wide architecture, conventions, and key invariants (OAuth-only auth, the 24-hour freshness rule), see [CLAUDE.md](CLAUDE.md).
