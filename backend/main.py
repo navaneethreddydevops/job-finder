@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -10,8 +10,8 @@ import sys
 
 sys.path.append(os.path.dirname(__file__))
 from agent import run_job_finder_agent
-from db import init_db, save_job, get_all_jobs, toggle_applied, delete_all_jobs
-from auth import init_auth_db, router as auth_router
+from db import init_db, save_job, get_user_jobs, toggle_applied, delete_user_jobs
+from auth import init_auth_db, router as auth_router, get_current_user
 from resume import init_resume_db, router as resume_router
 
 # Initialize database schema
@@ -53,7 +53,7 @@ async def publish_log(msg: str):
             pass
 
 
-async def run_agent_task(query: str):
+async def run_agent_task(query: str, user_id: int):
     """Background task to run the agent and save results to the SQLite database."""
     global agent_status
     import uuid
@@ -74,13 +74,13 @@ async def run_agent_task(query: str):
                     else (job.dict() if hasattr(job, "dict") else dict(job))
                 )
                 try:
-                    if save_job(job_dict):
+                    if save_job(job_dict, user_id):
                         inserted += 1
                 except Exception:
                     pass
             await publish_log(
                 f"\n[Backend] Saved a batch of {len(jobs_batch)} jobs "
-                f"({inserted} new). Database now holds {len(get_all_jobs())} total jobs.\n"
+                f"({inserted} new). Database now holds {len(get_user_jobs(user_id))} total jobs.\n"
             )
 
         # Initialize a new session ID every time to prevent corrupted resume states
@@ -90,6 +90,7 @@ async def run_agent_task(query: str):
         # Pass the tracked session_id
         results = await run_job_finder_agent(
             query,
+            user_id=user_id,
             log_callback=log_callback,
             session_id=agent_status["session_id"],
             is_resume=is_resume,
@@ -115,14 +116,14 @@ async def run_agent_task(query: str):
                     if hasattr(job, "model_dump")
                     else (job.dict() if hasattr(job, "dict") else dict(job))
                 )
-                if save_job(job_dict):
+                if save_job(job_dict, user_id):
                     inserted_count += 1
 
             updated_count = len(jobs_list) - inserted_count
             await publish_log(
                 f"\n[Backend] Reconciliation: agent's final merged list had {len(jobs_list)} jobs — "
                 f"{inserted_count} new, {updated_count} already saved from a batch. Database now holds "
-                f"{len(get_all_jobs())} total jobs.\n"
+                f"{len(get_user_jobs(user_id))} total jobs.\n"
             )
     except Exception as e:
         await publish_log(f"\n[Backend Error] Agent failed: {e}\n")
@@ -137,31 +138,31 @@ class ApplyRequest(BaseModel):
 
 
 @app.get("/api/jobs")
-async def get_jobs():
-    """Returns the list of jobs currently saved in the database."""
+async def get_jobs(user: dict = Depends(get_current_user)):
+    """Returns the list of jobs for the authenticated user."""
     try:
-        jobs = get_all_jobs()
+        jobs = get_user_jobs(user["id"])
         return {"jobs": jobs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading database: {e}")
 
 
 @app.patch("/api/jobs/{job_id}/apply")
-async def mark_applied(job_id: int, req: ApplyRequest):
-    """Marks a job as applied or not applied."""
+async def mark_applied(job_id: int, req: ApplyRequest, user: dict = Depends(get_current_user)):
+    """Marks a job as applied or not applied for the authenticated user."""
     try:
-        toggle_applied(job_id, req.applied)
+        toggle_applied(user["id"], job_id, req.applied)
         return {"success": True, "job_id": job_id, "applied": req.applied}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating job: {e}")
 
 
 @app.post("/api/jobs/clear")
-async def clear_jobs():
-    """Clears all jobs from the database."""
+async def clear_jobs(user: dict = Depends(get_current_user)):
+    """Clears all jobs for the authenticated user."""
     try:
-        delete_all_jobs()
-        return {"success": True, "message": "All jobs cleared from database."}
+        delete_user_jobs(user["id"])
+        return {"success": True, "message": "Your jobs cleared."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clearing database: {e}")
 
@@ -179,8 +180,8 @@ async def get_status():
 
 
 @app.post("/api/pull")
-async def pull_jobs(req: PullRequest, background_tasks: BackgroundTasks):
-    """Triggers the job finder agent in the background."""
+async def pull_jobs(req: PullRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    """Triggers the job finder agent in the background for the authenticated user."""
     global agent_status
     if agent_status["status"] == "running":
         raise HTTPException(
@@ -190,7 +191,7 @@ async def pull_jobs(req: PullRequest, background_tasks: BackgroundTasks):
     agent_status["status"] = "running"
     agent_status["query"] = req.query
 
-    background_tasks.add_task(run_agent_task, req.query)
+    background_tasks.add_task(run_agent_task, req.query, user["id"])
     return {"message": "Job pulling started", "query": req.query}
 
 
