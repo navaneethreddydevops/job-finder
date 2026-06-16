@@ -35,6 +35,7 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   // Keep the module-level token in sync for apiFetch.
+  // eslint-disable-next-line react-hooks/globals
   currentToken = auth?.token || null;
 
   const persist = useCallback((next) => {

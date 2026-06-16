@@ -56,6 +56,7 @@ export default function ResumeOptimizer() {
       if (saved.content) setContent(saved.content);
       if (saved.originalText) setOriginalText(saved.originalText);
     } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/immutability
     refreshStatus();
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -107,6 +108,7 @@ export default function ResumeOptimizer() {
       const data = await resp.json();
       setStatus(data);
       if (data.job_description) setJd((cur) => cur || data.job_description);
+      // eslint-disable-next-line react-hooks/immutability
       if (data.status === 'running') startPolling();
       if (data.status === 'done' && data.has_result) loadResult();
     } catch { /* ignore */ }

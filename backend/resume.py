@@ -15,9 +15,6 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
-# Repo root holds `.claude/skills/` — the SDK discovers project skills relative to cwd.
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
 from docx import Document
 from docx.shared import Inches, Pt
 from fastapi import (
@@ -32,6 +29,9 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+# Repo root holds `.claude/skills/` — the SDK discovers project skills relative to cwd.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Same OAuth-only rule as the rest of the backend: never authenticate via an API key.
 os.environ.pop("ANTHROPIC_API_KEY", None)
