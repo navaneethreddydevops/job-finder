@@ -4,11 +4,11 @@ Guidance for Claude Code (and other AI agents) working in this repository.
 
 ## What this is
 
-A full-stack **C2C (Corp-to-Corp) Job Finder**. An autonomous agent built on the
-**Claude Agent SDK** crawls job boards for recently-posted Data Engineer C2C roles,
-extracts them as structured JSON, and stores them in SQLite. A **FastAPI** backend
-exposes the agent + data over REST/SSE, and a **Vite + React** dashboard renders the
-results with live agent-thought streaming.
+A full-stack **Job Finder**. An autonomous agent built on the **Claude Agent SDK** crawls
+six job boards (LinkedIn, Dice, Monster, Indeed, Glassdoor, ZipRecruiter) for recently-posted jobs
+matching a user-provided search query, extracts them as structured JSON, and stores them
+in SQLite. A **FastAPI** backend exposes the agent + data over REST/SSE, and a **Vite + React**
+dashboard renders the results with live agent-thought streaming.
 
 ```
 job-finder/
@@ -58,16 +58,21 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
 
 ## Agent architecture
 
-`run_job_finder_agent()` in `backend/agent.py` configures a `ClaudeSDKClient` as an
+`run_job_finder_agent(query)` in `backend/agent.py` configures a `ClaudeSDKClient` as an
 **orchestrator** plus a `job_scout` **subagent**:
 
-- The orchestrator fans the search out by spawning one `job_scout` per source via the
-  built-in **Task tool** — at minimum LinkedIn, Dice, Monster, Indeed, ZipRecruiter —
-  running them in parallel, then merges and de-duplicates the results.
+- The orchestrator accepts a dynamic search query from the user (e.g. "Data Engineer", "Senior Python Developer")
+  and fans the search out by spawning one `job_scout` per source via the built-in **Task tool** —
+  LinkedIn, Dice, Monster, Indeed, Glassdoor, and ZipRecruiter — running them in parallel, then merges and de-duplicates
+  the results.
+- **Tools granted to both agents** (`AGENT_ALLOWED_TOOLS` and `SCOUT_ALLOWED_TOOLS`):
+  - **File operations**: `Read`, `Write`, `Edit` — for processing and storing job data
+  - **System operations**: `Bash`, `Glob`, `Grep` — for data processing and filtering
+  - **Web operations**: `WebSearch`, `WebFetch` — for discovering and reading job listings
+  - **Agent control**: `Task` (orchestrator only), `TodoWrite` — for orchestration and planning
+  - There is **no MCP integration**.
 - `model=None` (inherits whatever model the `claude` CLI is configured with);
   `max_turns=80`; `permission_mode="bypassPermissions"`.
-- **Web tooling**: Claude's built-in `WebSearch` and `WebFetch` only — there is **no MCP
-  integration**. The scouts search and read job boards with these built-in tools.
 - **Structured output** is enforced via `output_format=JobList.model_json_schema()`;
   the stream is also parsed for a ```json fenced block as a fallback.
 
@@ -90,7 +95,7 @@ shown. This is enforced at every layer, so keep them in sync if you touch one:
 
 The agent uses Claude's built-in web tools directly — no MCP servers are configured.
 
-- `WebSearch` — targeted web queries (e.g. `C2C Data Engineer site:linkedin.com`) with each
+- `WebSearch` — targeted web queries using the user's search term (e.g. `<query> site:linkedin.com`) with each
   board's last-24h recency filter.
 - `WebFetch` — opens and reads individual listings to verify dates and extract fields.
 

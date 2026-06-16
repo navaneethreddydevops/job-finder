@@ -10,12 +10,11 @@ It is the source of truth for the work and should be kept in sync with the code.
 
 Reference: https://code.claude.com/docs/en/agent-sdk/overview
 
-The job-finder orchestrator (`backend/agent.py`) previously relied on
-`permission_mode="bypassPermissions"` alone and never declared which tools the agent
-was allowed to use. We now explicitly grant the agent the **full built-in toolset**
-(no MCP integration), so behaviour is intentional and documented.
+The job-finder orchestrator (`backend/agent.py`) searches for jobs matching a user-provided query
+across six job boards: **LinkedIn, Dice, Monster, Indeed, Glassdoor, and ZipRecruiter**. The agent is granted
+the **full built-in toolset** (no MCP integration), with behavior intentional and documented.
 
-**Built-in tools granted** (per the Agent SDK overview):
+**Built-in tools granted to orchestrator** (per the Agent SDK overview):
 
 | Tool          | Purpose |
 | ------------- | ------- |
@@ -30,13 +29,17 @@ was allowed to use. We now explicitly grant the agent the **full built-in toolse
 | `Task`        | Spawn the `job_scout` subagent (fan-out) |
 | `TodoWrite`   | Track multi-step plans |
 
-**Web tooling**: the agent uses Claude's built-in `WebSearch` and `WebFetch` only —
-there is **no MCP integration** (the former `job_finder_tools` and `puppeteer` MCP
-servers were removed).
+**Built-in tools granted to job_scout subagent**: the scout receives the same comprehensive
+toolset as the orchestrator (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`,
+`WebFetch`, `TodoWrite`) to enable flexible searching, data processing, and result formatting
+across all job sources.
 
-Implementation: a module-level `AGENT_ALLOWED_TOOLS` list passed to
-`ClaudeAgentOptions(allowed_tools=...)`. The `job_scout` subagent keeps its narrower
-toolset (`WebSearch`, `WebFetch`).
+**Web tooling**: the agent uses Claude's built-in `WebSearch` and `WebFetch` for job discovery —
+there is **no MCP integration** (the former `job_finder_tools` and `puppeteer` MCP servers
+were removed).
+
+Implementation: module-level `AGENT_ALLOWED_TOOLS` and `SCOUT_ALLOWED_TOOLS` lists passed to
+`ClaudeAgentOptions(allowed_tools=...)` and the `job_scout` AgentDefinition respectively.
 
 ---
 

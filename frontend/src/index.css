@@ -136,15 +136,33 @@ body {
 .logo-badge {
   background: var(--bg-subtle);
   border: 1px solid var(--border);
-  color: var(--text-secondary);
+  color: var(--success);
   font-size: 0.68rem;
   font-weight: 600;
   padding: 0.2rem 0.6rem;
+  padding-left: 0.35rem;
   border-radius: 9999px;
   letter-spacing: 0.02em;
   margin-left: 0.5rem;
   backdrop-filter: none;
   text-transform: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  position: relative;
+  animation: blink-badge 1.5s ease-in-out infinite;
+}
+
+.logo-badge::before {
+  content: '';
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  background: var(--success);
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: blink-dot 1.5s ease-in-out infinite;
+  box-shadow: 0 0 0.3rem rgba(42, 126, 79, 0.6);
 }
 
 .header-actions {
@@ -1038,6 +1056,22 @@ dialog.job-details-dialog[open]::backdrop {
 @keyframes pulse-slow {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
+}
+
+@keyframes blink-badge {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes blink-dot {
+  0%, 100% {
+    background: var(--success);
+    box-shadow: 0 0 0.3rem rgba(42, 126, 79, 0.6);
+  }
+  50% {
+    background: var(--success);
+    box-shadow: 0 0 0.8rem rgba(42, 126, 79, 1);
+  }
 }
 
 .spin {

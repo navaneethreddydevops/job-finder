@@ -28,20 +28,41 @@ os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 
 # Full built-in toolset granted to the orchestrator (see the Claude Agent SDK overview:
-# https://code.claude.com/docs/en/agent-sdk/overview). The agent relies solely on Claude's
-# built-in web tooling (WebSearch + WebFetch) — there is no MCP integration. Granting tools
-# explicitly makes the agent's capabilities clear rather than relying on bypassPermissions alone.
+# https://code.claude.com/docs/en/agent-sdk/overview). The agent relies on Claude's
+# built-in web tooling (WebSearch + WebFetch) for job discovery, plus file I/O and system
+# tools for processing and merging results. There is no MCP integration.
 AGENT_ALLOWED_TOOLS = [
-    # Built-in tools
+    # File and text operations
     "Read",
     "Write",
     "Edit",
+    # System operations
     "Bash",
     "Glob",
     "Grep",
+    # Web operations
     "WebSearch",
     "WebFetch",
+    # Agent control
     "Task",  # spawns the job_scout subagent (fan-out)
+    "TodoWrite",
+]
+
+# Tools granted to the job_scout subagent — comprehensive toolset for searching,
+# fetching, and processing job data from multiple sources in parallel.
+SCOUT_ALLOWED_TOOLS = [
+    # File and text operations
+    "Read",
+    "Write",
+    "Edit",
+    # System operations
+    "Bash",
+    "Glob",
+    "Grep",
+    # Web operations
+    "WebSearch",
+    "WebFetch",
+    # Task tracking
     "TodoWrite",
 ]
 
@@ -180,18 +201,18 @@ async def run_job_finder_agent(
     # built-in Task tool so coverage scales out instead of being done serially.
     job_scout = AgentDefinition(
         description=(
-            "Scouts a single job board/source for recent C2C (Corp-to-Corp) Data Engineer "
-            "postings and returns them as a JSON list. Use this for each source you want covered."
+            "Scouts a single job board/source for recent C2C (Corp-to-Corp) job "
+            "postings matching a search query and returns them as a JSON list. Use this for each source you want covered."
         ),
         prompt=(
             "You are a focused job scout. You will be given ONE source (e.g. LinkedIn, Dice, Monster, "
-            "Indeed, ZipRecruiter), a search query, and the run date. "
-            "Find AS MANY FRESH C2C / Corp-to-Corp Data Engineer postings on that source as you possibly can, but "
+            "Indeed, Glassdoor, ZipRecruiter), a search query, and the run date. "
+            "Find AS MANY FRESH C2C / Corp-to-Corp postings on that source as you possibly can matching the search query, but "
             "ONLY ones posted within the LAST 24 HOURS (i.e. today / on the run date). Discard anything older. "
             "Use each site's recency filter to enforce this — e.g. LinkedIn `f_TPR=r86400`, Indeed `fromage=1`, "
-            "Dice/Monster 'posted today / last 24 hours'. "
+            "Dice/Monster/Glassdoor/ZipRecruiter 'posted today / last 24 hours'. "
             "Use the built-in `WebSearch` tool for quick lookups with targeted queries like "
-            "'C2C Data Engineer site:<source>', and use `WebFetch` to open and read individual listings. "
+            "'<search_query> site:<source>', and use `WebFetch` to open and read individual listings. "
             "Verify each posting's date before keeping it. "
             "For each job extract: title, company, location, url, date_posted (e.g. '3 hours ago', 'today'), "
             "posted_within_24h (true only when genuinely posted in the last 24 hours), c2c_viability "
@@ -200,7 +221,7 @@ async def run_job_finder_agent(
             "Return ONLY a JSON array of job objects — no commentary."
         ),
         model="inherit",
-        tools=["WebSearch", "WebFetch"],
+        tools=SCOUT_ALLOWED_TOOLS,
     )
 
     # Agent config
@@ -217,19 +238,17 @@ async def run_job_finder_agent(
         output_format=JobList.model_json_schema(),
         permission_mode="bypassPermissions",
         system_prompt=(
-            "You are a professional Job Finder orchestrator specializing in finding C2C (Corp-to-Corp) "
-            "Data Engineer roles. Your goal is to compile AS MANY matching, recently-posted jobs as possible — "
-            "there is no upper limit; more is better. "
+            "You are a professional Job Finder orchestrator. Your goal is to compile AS MANY matching, "
+            "recently-posted jobs as possible for the given search query — there is no upper limit; more is better. "
             "You have a `job_scout` subagent (invoke it with the Task tool) plus Claude's built-in web tools "
             "(`WebSearch` for queries and `WebFetch` for reading individual listings). "
             "STRATEGY: Delegate breadth to subagents. Spawn one `job_scout` per source — at minimum LinkedIn, Dice, "
-            "Monster, Indeed, and ZipRecruiter — running them in parallel (issue multiple Task calls together) so the "
+            "Monster, Indeed, Glassdoor, and ZipRecruiter — running them in parallel (issue multiple Task calls together) so the "
             "search fans out. Each scout returns a JSON array of jobs for its source. You may spawn additional scouts "
             "for more sources or extra query variations if it yields more jobs. "
             "Then merge every scout's results, de-duplicate by URL (or by title+company when the URL is missing), and "
-            "keep ONLY roles posted within the last 24 hours (today / the run date) where C2C / Corp-to-Corp is "
-            "explicitly mentioned or very likely. Drop anything older than 24 hours and set posted_within_24h "
-            "accurately on every job. "
+            "keep ONLY roles posted within the last 24 hours (today / the run date). "
+            "Drop anything older than 24 hours and set posted_within_24h accurately on every job. "
             "CRITICAL: Your final answer MUST be valid JSON matching the provided schema (a single 'jobs' key holding "
             "the full merged list). Do not return conversational markdown."
         ),
@@ -242,18 +261,17 @@ async def run_job_finder_agent(
         await log_callback(f"[Debug] Options model: {options.model}\n")
 
     prompt = (
-        f"The run date is {run_date}. Compile a list of AS MANY C2C Data Engineer job postings as you possibly can "
+        f"The run date is {run_date}. Compile a list of AS MANY job postings as you possibly can "
         f"matching the query '{query}', but ONLY jobs posted within the LAST 24 HOURS (today / the run date {run_date}). "
         f"There is no upper limit — find as many fresh ones as you can. "
         f"Fan the search out by spawning one `job_scout` subagent per source via the Task tool, running them in "
-        f"parallel: at minimum LinkedIn, Dice, Monster, Indeed, and ZipRecruiter. Pass each scout the run date and "
-        f"tell it to only return jobs posted in the last 24 hours. Spawn extra scouts for additional sources or query "
+        f"parallel: at minimum LinkedIn, Dice, Monster, Indeed, Glassdoor, and ZipRecruiter. Pass each scout the run date and query, "
+        f"and tell it to only return jobs posted in the last 24 hours. Spawn extra scouts for additional sources or query "
         f"variations if they surface more fresh jobs. "
-        f"Each scout should use targeted queries like 'C2C Data Engineer site:linkedin.com', "
-        f"'Contract Data Engineer C2C site:monster.com', or 'Data Engineer C2C site:dice.com', combined with each "
+        f"Each scout should use targeted queries like '{query} site:linkedin.com', "
+        f"'{query} site:monster.com', '{query} site:dice.com', etc., combined with each "
         f"site's last-24-hours recency filter. "
         f"DISCARD any job older than 24 hours, and set posted_within_24h=true on every job you return. "
-        f"Filter out jobs that are strictly W2 or do not allow contract terms. "
         f"Merge all scout results and de-duplicate before responding. "
         f"\n\nCRITICAL: When you are done, you MUST return the final list of jobs as ONLY a valid JSON object wrapped in ```json ... ``` blocks. "
         f"The JSON object must have a single key 'jobs' containing a list of job objects. Each job object must match this schema:\n"

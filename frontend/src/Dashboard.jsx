@@ -650,7 +650,7 @@ function Dashboard() {
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
                   {status.status === 'running' && (
-                    <span className="logo-badge" style={{ animation: 'pulse-slow 1s infinite' }}>live</span>
+                    <span className="logo-badge" style={{ animation: 'blink-badge 1.5s ease-in-out infinite' }}>live</span>
                   )}
                   {logs.length > 0 && (
                     <button
