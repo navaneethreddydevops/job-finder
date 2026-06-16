@@ -1234,8 +1234,29 @@ dialog.job-details-dialog[open]::backdrop {
 .docx-host .docx-wrapper { background: transparent; padding: 0; }
 .docx-host .docx { box-shadow: 0 1px 8px rgba(15,15,15,0.12); margin: 0 auto; }
 
+/* Fix docx-preview bullet list rendering — hide checkbox symbols, use list-style instead */
+.docx-host .docx_listbullet,
+.docx-host [class*="docx-num"] {
+  list-style: disc !important;
+  margin-left: 1.5em !important;
+}
+
+/* Inject bullet via pseudo-element if needed */
+.docx-host p.docx_listbullet::before,
+.docx-host p[class*="docx-num"]::before {
+  content: "• ";
+  margin-right: 0.25em;
+}
+
 /* ---- Resume Optimizer: editor, diff, fit ---- */
-.resume-pane-tools { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.resume-pane-tools {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
 .btn-sm {
   padding: 0.3rem 0.6rem;
   font-size: 0.78rem;
@@ -1322,4 +1343,423 @@ dialog.job-details-dialog[open]::backdrop {
   min-height: auto !important;
   padding: 1.25rem !important;
   box-shadow: 0 1px 8px rgba(15,15,15,0.12);
+}
+
+/* ============================================================
+   Task 6 — UI/UX Enhancement Pass
+   ============================================================ */
+
+/* Focus visible ring — all interactive elements */
+*:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* ── 6.1 Header ─────────────────────────────────────────────────────────── */
+
+/* Nav link — lighter weight than action buttons */
+.btn.nav-link {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.btn.nav-link:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+/* Compact backend health pill */
+.health-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.25rem 0.6rem;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+}
+.health-pill.ok { color: var(--success); background: rgba(219,237,219,0.45); border-color: rgba(42,126,79,0.25); }
+.health-pill.error { color: var(--danger); background: rgba(224,62,62,0.07); border-color: rgba(224,62,62,0.25); }
+
+.health-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* Agent active badge */
+.agent-active-badge {
+  background: var(--accent-glow);
+  border-color: var(--border-accent);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  animation: pulse-slow 1.4s infinite;
+}
+
+/* Hide text labels on very small screens */
+@media (max-width: 600px) {
+  .header-btn-label { display: none; }
+  .header-actions { gap: 0.35rem; }
+}
+
+/* ── 6.2 Onboarding banner ───────────────────────────────────────────────── */
+
+.onboarding-banner {
+  position: relative;
+  background: var(--primary-glow);
+  border: 1px solid rgba(35,131,226,0.18);
+  border-radius: var(--radius-lg);
+  padding: 1.1rem 2.5rem 1.1rem 1.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.onboarding-steps {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.onboarding-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  flex: 1;
+  min-width: 120px;
+}
+
+.onboarding-step strong { font-size: 0.85rem; color: var(--text-primary); display: block; }
+.onboarding-step p { font-size: 0.78rem; color: var(--text-secondary); margin: 0; }
+
+.onboarding-num {
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.onboarding-arrow {
+  color: var(--text-muted);
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.onboarding-dismiss {
+  position: absolute;
+  top: 0.6rem; right: 0.6rem;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0.2rem;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.onboarding-dismiss:hover { color: var(--text-primary); background: rgba(0,0,0,0.06); }
+
+/* ── 6.3 Stats ───────────────────────────────────────────────────────────── */
+
+.stat-value-success { color: var(--success) !important; }
+
+.stat-updated {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: -1rem;  /* pull up, sits below stats grid */
+}
+
+/* ── 6.4 Filter panel ────────────────────────────────────────────────────── */
+
+.sidebar-section-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.filter-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  user-select: none;
+  padding-bottom: 0.25rem;
+}
+.filter-section-header:hover { color: var(--text-primary); }
+.filter-section-header.open { color: var(--text-primary); }
+
+.filter-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 0.35rem;
+  margin-left: 0.4rem;
+  background: var(--primary);
+  color: #fff;
+  border-radius: 9999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.clear-filters-link {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--primary);
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 0;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  transition: text-decoration-color var(--transition-fast);
+}
+.clear-filters-link:hover { text-decoration-color: var(--primary); }
+
+.source-count {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 0.75em;
+}
+
+/* Active filter tags above job list */
+.active-filter-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+  margin-bottom: 0.25rem;
+}
+
+.active-filter-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: var(--primary-glow);
+  border: 1px solid rgba(35,131,226,0.22);
+  color: var(--primary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.2rem 0.5rem;
+  border-radius: 9999px;
+}
+
+.active-filter-tag button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--primary);
+  display: flex;
+  align-items: center;
+  padding: 0;
+  opacity: 0.7;
+}
+.active-filter-tag button:hover { opacity: 1; }
+
+/* ── 6.5 Job cards search hint ───────────────────────────────────────────── */
+
+.panel-title-count {
+  font-size: 1.05rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* ── 6.6 Console collapse + copy ─────────────────────────────────────────── */
+
+.console-elapsed {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 0.85em;
+}
+
+.console-copy-btn {
+  padding: 0.15rem 0.35rem !important;
+  font-size: 0.72rem !important;
+}
+
+/* ── 6.8 Toast notifications ─────────────────────────────────────────────── */
+
+.toast-container {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  padding: 0.65rem 0.85rem;
+  box-shadow: var(--shadow-lg);
+  min-width: 220px;
+  max-width: 340px;
+  pointer-events: all;
+  animation: toast-in 0.18s ease-out;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.toast-success { border-left-color: var(--success); }
+.toast-error { border-left-color: var(--danger); }
+.toast-info { border-left-color: var(--primary); }
+
+.toast-icon { flex-shrink: 0; }
+.toast-success .toast-icon { color: var(--success); }
+.toast-error .toast-icon { color: var(--danger); }
+.toast-info .toast-icon { color: var(--primary); }
+
+.toast-message {
+  flex: 1;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.toast-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  padding: 0.1rem;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.toast-close:hover { color: var(--text-primary); background: var(--bg-subtle); }
+
+/* ── 6.8 Skeleton loading cards ──────────────────────────────────────────── */
+
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-subtle) 25%, #efefef 50%, var(--bg-subtle) 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: var(--radius-sm);
+}
+
+.skeleton-card { cursor: default !important; pointer-events: none; }
+.skeleton-title { height: 18px; width: 75%; margin-bottom: 0.5rem; }
+.skeleton-line { height: 13px; width: 60%; }
+.skeleton-line.short { width: 45%; margin-top: 0.35rem; }
+.skeleton-text { height: 52px; width: 100%; margin-top: 0.25rem; }
+.skeleton-badge { height: 20px; width: 80px; border-radius: 9999px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+}
+
+/* ── 6.7 Resume Optimizer ────────────────────────────────────────────────── */
+
+.resume-step-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.resume-step-num {
+  font-size: 1rem;
+  color: var(--primary);
+}
+
+/* Drag-over highlight for the drop zone */
+.resume-drop.drag-over {
+  outline: 2px dashed var(--border-focus);
+  outline-offset: -4px;
+  background: var(--primary-glow);
+}
+
+/* Prominent download button in pane header */
+.resume-download-btn {
+  font-size: 0.8rem;
+  padding: 0.35rem 0.75rem;
+}
+
+/* Diff legend */
+.resume-diff-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--success);
+  padding: 0.4rem 1rem;
+  background: var(--success-glow);
+  border-bottom: 1px solid rgba(42,126,79,0.15);
+}
+
+.resume-legend-dot {
+  width: 10px; height: 10px;
+  border-radius: 2px;
+  background: rgba(42,126,79,0.35);
+  border: 1px solid rgba(42,126,79,0.4);
+  flex-shrink: 0;
+}
+
+/* ── 6.9 Mobile responsiveness ───────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .app-container { padding: 1.25rem 1rem 3rem; gap: 1.25rem; }
+
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+
+  /* Sidebar stacks above job list on mobile */
+  .dashboard-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .sidebar-panel { position: static; }
+
+  /* Resume Optimizer: tabbed on mobile */
+  .resume-split { grid-template-columns: 1fr; }
+
+  /* Pagination compact */
+  .pagination-info { font-size: 0.78rem; }
+
+  /* Onboarding banner stacks */
+  .onboarding-steps { flex-direction: column; gap: 0.5rem; }
+  .onboarding-arrow { display: none; }
+}
+
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 0.65rem; }
+  .stat-value { font-size: 1.5rem; }
+  .panel-header { flex-direction: column; align-items: flex-start; }
+  .panel-header form { width: 100% !important; }
 }

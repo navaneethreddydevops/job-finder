@@ -46,7 +46,19 @@ export default function UserMenu() {
       </button>
 
       {open && (
-        <div className="user-menu-dropdown" role="menu" id="user-menu-dropdown">
+        <div
+          className="user-menu-dropdown"
+          role="menu"
+          id="user-menu-dropdown"
+          onKeyDown={(e) => {
+            const items = menuRef.current?.querySelectorAll('[role="menuitem"]');
+            if (!items) return;
+            const idx = Array.from(items).indexOf(document.activeElement);
+            if (e.key === 'ArrowDown') { e.preventDefault(); items[(idx + 1) % items.length]?.focus(); }
+            if (e.key === 'ArrowUp') { e.preventDefault(); items[(idx - 1 + items.length) % items.length]?.focus(); }
+            if (e.key === 'Tab') setOpen(false);
+          }}
+        >
           <div className="user-menu-head">
             <span className="user-avatar lg">{initial}</span>
             <div className="user-menu-head-text">
