@@ -172,6 +172,7 @@ def _extract_jobs_from_text(text: str) -> list[dict]:
 # Running the Agent with real-time thought logs
 async def run_job_finder_agent(
     query: str,
+    user_id: int,
     log_callback=None,
     session_id=None,
     is_resume=False,
@@ -181,6 +182,7 @@ async def run_job_finder_agent(
 
     Args:
         query: Search criteria, e.g. "C2C Data Engineer"
+        user_id: The ID of the user running the search (for multi-tenant data isolation)
         log_callback: Async function to stream thoughts/logs to (receives strings)
         session_id: A valid UUID string.
         is_resume: Whether the session_id is for an existing session to resume.

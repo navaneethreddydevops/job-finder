@@ -22,10 +22,11 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             title TEXT,
             company TEXT,
             location TEXT,
-            url TEXT UNIQUE,
+            url TEXT,
             date_posted TEXT,
             c2c_viability TEXT,
             key_requirements TEXT,
@@ -34,7 +35,8 @@ def init_db():
             source TEXT,
             description TEXT,
             applied INTEGER DEFAULT 0,
-            posted_within_24h INTEGER DEFAULT 0
+            posted_within_24h INTEGER DEFAULT 0,
+            UNIQUE(user_id, url)
         )
     """)
     # Migrate existing databases that predate the posted_within_24h column.
@@ -44,19 +46,49 @@ def init_db():
         cursor.execute(
             "ALTER TABLE jobs ADD COLUMN posted_within_24h INTEGER DEFAULT 0"
         )
+    # Migrate existing databases that predate the user_id column.
+    if "user_id" not in existing_cols:
+        cursor.execute(
+            "ALTER TABLE jobs ADD COLUMN user_id INTEGER"
+        )
+        # Delete all existing jobs (clean slate for multi-tenant)
+        cursor.execute("DELETE FROM jobs WHERE user_id IS NULL")
+        # Add NOT NULL constraint by recreating table with proper schema
+        cursor.execute("""
+            CREATE TABLE jobs_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                title TEXT,
+                company TEXT,
+                location TEXT,
+                url TEXT,
+                date_posted TEXT,
+                c2c_viability TEXT,
+                key_requirements TEXT,
+                contact_email TEXT,
+                contact_phone TEXT,
+                source TEXT,
+                description TEXT,
+                applied INTEGER DEFAULT 0,
+                posted_within_24h INTEGER DEFAULT 0,
+                UNIQUE(user_id, url)
+            )
+        """)
+        cursor.execute("DROP TABLE jobs")
+        cursor.execute("ALTER TABLE jobs_new RENAME TO jobs")
     conn.commit()
     conn.close()
 
 
-def save_job(job_dict):
+def save_job(job_dict, user_id: int):
     """
-    Saves or updates a job and returns True if a new row was inserted, False if an
-    existing row was updated.
+    Saves or updates a job for a specific user and returns True if a new row was inserted,
+    False if an existing row was updated.
 
-    De-duplication is keyed on the posting URL when present. Many scraped jobs come
+    De-duplication is keyed on (user_id, URL) when present. Many scraped jobs come
     back with an empty/missing URL, so we synthesize a stable key from
     title|company|location for those — otherwise every URL-less job would collide on
-    the UNIQUE(url) constraint and collapse into a single row.
+    the UNIQUE(user_id, url) constraint and collapse into a single row.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -70,8 +102,8 @@ def save_job(job_dict):
         url = f"manual:{title}|{company}|{location}"
     job_dict["url"] = url
 
-    # Check if job with this URL already exists
-    cursor.execute("SELECT id, applied FROM jobs WHERE url = ?", (url,))
+    # Check if job with this URL already exists for this user
+    cursor.execute("SELECT id, applied FROM jobs WHERE url = ? AND user_id = ?", (url, user_id))
     row = cursor.fetchone()
 
     key_reqs_json = json.dumps(job_dict.get("key_requirements", []))
@@ -87,7 +119,7 @@ def save_job(job_dict):
             SET title = ?, company = ?, location = ?, date_posted = ?,
                 c2c_viability = ?, key_requirements = ?, contact_email = ?,
                 contact_phone = ?, source = ?, description = ?, posted_within_24h = ?
-            WHERE id = ?
+            WHERE id = ? AND user_id = ?
         """,
             (
                 title,
@@ -102,6 +134,7 @@ def save_job(job_dict):
                 job_dict.get("description"),
                 posted_within_24h,
                 job_id,
+                user_id,
             ),
         )
     else:
@@ -110,12 +143,13 @@ def save_job(job_dict):
         cursor.execute(
             """
             INSERT INTO jobs (
-                title, company, location, url, date_posted,
+                user_id, title, company, location, url, date_posted,
                 c2c_viability, key_requirements, contact_email,
                 contact_phone, source, description, applied, posted_within_24h
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         """,
             (
+                user_id,
                 title,
                 company,
                 location,
@@ -135,10 +169,10 @@ def save_job(job_dict):
     return inserted
 
 
-def get_all_jobs():
+def get_user_jobs(user_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM jobs ORDER BY id DESC")
+    cursor.execute("SELECT * FROM jobs WHERE user_id = ? ORDER BY id DESC", (user_id,))
     rows = cursor.fetchall()
     jobs = []
     for row in rows:
@@ -156,19 +190,20 @@ def get_all_jobs():
     return jobs
 
 
-def toggle_applied(job_id: int, applied: bool):
+def toggle_applied(user_id: int, job_id: int, applied: bool):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE jobs SET applied = ? WHERE id = ?", (1 if applied else 0, job_id)
+        "UPDATE jobs SET applied = ? WHERE id = ? AND user_id = ?",
+        (1 if applied else 0, job_id, user_id),
     )
     conn.commit()
     conn.close()
 
 
-def delete_all_jobs():
+def delete_user_jobs(user_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM jobs")
+    cursor.execute("DELETE FROM jobs WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()

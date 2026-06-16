@@ -9,7 +9,6 @@ The username is the user's email; passwords must be at least 8 characters.
 
 import hashlib
 import hmac
-import os
 import re
 import secrets
 from datetime import datetime, timezone
