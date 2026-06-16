@@ -21,3 +21,9 @@ backend/jobs.db-journal
 .vscode/
 *.swp
 *.bak
+# Never include credentials in Docker build context
+.claude/
+.claude-dev/
+.env
+.env.local
+.env.*.local

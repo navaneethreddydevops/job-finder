@@ -223,3 +223,10 @@ __marimo__/
 
 # Claude Code local config
 .firecrawl/*
+
+# Claude CLI credentials (NEVER commit these!)
+.claude/
+.claude-dev/
+
+# Docker-related files
+docker-compose.override.yml
