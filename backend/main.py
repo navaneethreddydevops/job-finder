@@ -243,8 +243,8 @@ else:
     @app.get("/")
     async def index():
         return {
-            "message": "C2C Job Finder Backend is running.",
-            "status": "Vite development frontend has not been compiled yet or should be run separately.",
+            "message": "Job Finder Backend is running.",
+            "status": "Ok.",
         }
 
 
