@@ -109,6 +109,12 @@ body {
   flex-wrap: wrap;
 }
 
+/* Backend status (inline in header actions) */
+.header-status-corner {
+  display: flex;
+  align-items: center;
+}
+
 .app-header::after { content: none; }
 
 .logo-section {

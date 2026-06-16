@@ -519,32 +519,22 @@ function Dashboard() {
           </div>
         )}
 
-        <div className="header-actions" style={{ alignItems: 'flex-end' }}>
+        <div className="header-actions">
+          {/* Backend status */}
+          <div className="header-status-corner">
+            <div className={`health-pill ${healthStatus}`} title={`Backend ${healthStatus === 'ok' ? 'online' : healthStatus === 'error' ? 'offline' : 'checking'}`}>
+              <div className="health-dot" />
+              <span>{healthStatus === 'ok' ? 'Online' : healthStatus === 'error' ? 'Offline' : '…'}</span>
+            </div>
+          </div>
+
           {/* nav link — styled differently from action buttons */}
           <Link to="/resume/optimizer" className="btn nav-link" title="Resume Optimizer">
             <FileText size={16} />
             <span className="header-btn-label">Resume Optimizer</span>
           </Link>
 
-          <button
-            id="sync-db-btn"
-            className={`btn ${status.status === 'running' ? 'disabled' : ''}`}
-            onClick={() => fetchJobs(true)}
-            disabled={status.status === 'running'}
-            title="Refresh current local database"
-          >
-            <RefreshCw size={16} className={status.status === 'running' ? 'spin' : ''} />
-            <span className="header-btn-label">Sync</span>
-          </button>
-
-          {/* health pill stacked above the user profile */}
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.4rem' }}>
-            <div className={`health-pill ${healthStatus}`} title={`Backend ${healthStatus === 'ok' ? 'online' : healthStatus === 'error' ? 'offline' : 'checking'}`}>
-              <div className="health-dot" />
-              <span>{healthStatus === 'ok' ? 'Online' : healthStatus === 'error' ? 'Offline' : '…'}</span>
-            </div>
-            <UserMenu />
-          </div>
+          <UserMenu />
         </div>
       </header>
 
@@ -636,6 +626,46 @@ function Dashboard() {
               {status.status === 'running' ? 'Agent Running…' : 'Trigger Agent Run'}
             </button>
           </form>
+
+          {/* — Sync & Reset Actions — */}
+          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
+            <button
+              id="sync-db-btn"
+              className={`btn ${status.status === 'running' ? 'disabled' : ''}`}
+              onClick={() => fetchJobs(true)}
+              disabled={status.status === 'running'}
+              title="Refresh and reload jobs from database"
+              style={{ flex: 1 }}
+            >
+              <RefreshCw size={16} className={status.status === 'running' ? 'spin' : ''} />
+              <span>Sync</span>
+            </button>
+            <button
+              id="reset-db-btn"
+              className="btn"
+              onClick={async () => {
+                try {
+                  const resp = await fetch('/api/jobs/clear', { method: 'POST' });
+                  if (resp.ok) {
+                    setJobs([]);
+                    setSelectedJob(null);
+                    addToast('Database reset', 'success');
+                  } else {
+                    addToast('Failed to reset database', 'error');
+                  }
+                } catch (err) {
+                  addToast('Error resetting database', 'error');
+                  console.error(err);
+                }
+              }}
+              disabled={status.status === 'running' || jobs.length === 0}
+              title="Clear all jobs from database for a fresh run"
+              style={{ flex: 1 }}
+            >
+              <X size={16} />
+              <span>Reset</span>
+            </button>
+          </div>
 
           {/* — Collapsible Agent Console — */}
           {(status.status === 'running' || logs.length > 0) && (
