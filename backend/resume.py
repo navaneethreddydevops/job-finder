@@ -44,7 +44,7 @@ from claude_agent_sdk.types import (  # noqa: E402
     ResultMessage,
 )
 
-from db import get_db_connection  # noqa: E402
+from db import BLOB_TYPE, IS_POSTGRES, get_db_connection  # noqa: E402
 from auth import get_current_user  # noqa: E402
 
 
@@ -55,7 +55,7 @@ def init_resume_db():
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS resume_jobs (
             user_id INTEGER PRIMARY KEY,
             status TEXT DEFAULT 'idle',
@@ -65,16 +65,23 @@ def init_resume_db():
             original_text TEXT DEFAULT '',
             result_markdown TEXT DEFAULT '',
             result_json TEXT DEFAULT '',
-            result_docx BLOB,
+            result_docx {BLOB_TYPE},
             error TEXT DEFAULT '',
             updated_at TEXT
         )
         """
     )
     # Migrate older databases that predate the structured result_json column.
-    cur.execute("PRAGMA table_info(resume_jobs)")
-    cols = {row[1] for row in cur.fetchall()}
-    if "result_json" not in cols:
+    if IS_POSTGRES:
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'resume_jobs' AND column_name = 'result_json'"
+        )
+        has_result_json = cur.fetchone() is not None
+    else:
+        cur.execute("PRAGMA table_info(resume_jobs)")
+        has_result_json = "result_json" in {row[1] for row in cur.fetchall()}
+    if not has_result_json:
         cur.execute("ALTER TABLE resume_jobs ADD COLUMN result_json TEXT DEFAULT ''")
     conn.commit()
     conn.close()

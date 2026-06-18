@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import UserMenu from './components/UserMenu.jsx';
 import { useToast } from './components/Toast.jsx';
+import { apiFetch, apiUrl } from './auth';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -123,7 +124,7 @@ function Dashboard() {
   const fetchJobs = async (showToast = false) => {
     setJobsLoading(true);
     try {
-      const resp = await fetch('/api/jobs');
+      const resp = await apiFetch('/api/jobs');
       if (resp.ok) {
         const data = await resp.json();
         const fresh = (data.jobs || []).filter(isWithin24h);
@@ -141,7 +142,7 @@ function Dashboard() {
   const handleToggleApplied = async (jobId, currentApplied) => {
     try {
       const newApplied = !currentApplied;
-      const resp = await fetch(`/api/jobs/${jobId}/apply`, {
+      const resp = await apiFetch(`/api/jobs/${jobId}/apply`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ applied: newApplied }),
@@ -163,7 +164,7 @@ function Dashboard() {
 
   const fetchStatus = async () => {
     try {
-      const resp = await fetch('/api/status');
+      const resp = await fetch(apiUrl('/api/status'));
       if (resp.ok) setStatus(await resp.json());
     } catch (err) {
       console.error('Failed to fetch status:', err);
@@ -172,7 +173,7 @@ function Dashboard() {
 
   const startStreaming = () => {
     if (eventSourceRef.current) eventSourceRef.current.close();
-    const es = new EventSource('/api/stream');
+    const es = new EventSource(apiUrl('/api/stream'));
     eventSourceRef.current = es;
     es.onmessage = (event) => {
       try {
@@ -196,7 +197,7 @@ function Dashboard() {
     const runPromise = (async () => {
       try {
         setLogs([]);
-        const resp = await fetch('/api/pull', {
+        const resp = await apiFetch('/api/pull', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: queryValue }),
@@ -244,7 +245,7 @@ function Dashboard() {
   useEffect(() => {
     const check = async () => {
       try {
-        const resp = await fetch('/api/health');
+        const resp = await fetch(apiUrl('/api/health'));
         setHealthStatus(resp.ok ? 'ok' : 'error');
       } catch { setHealthStatus('error'); }
     };
@@ -262,7 +263,7 @@ function Dashboard() {
       }
       interval = setInterval(async () => {
         try {
-          const resp = await fetch('/api/status');
+          const resp = await fetch(apiUrl('/api/status'));
           if (resp.ok) {
             const data = await resp.json();
             setStatus(data);
@@ -437,7 +438,7 @@ function Dashboard() {
             if (!q) return { success: false, error: 'Search query required' };
             setQuery(q); setLogs([]);
             try {
-              const resp = await fetch('/api/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: q }) });
+              const resp = await apiFetch('/api/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: q }) });
               if (resp.ok) { setStatus({ status: 'running', query: q }); setAgentStartTime(performance.now()); setConsoleOpen(true); startStreaming(); return { success: true, message: `Scraper initiated for '${q}'` }; }
               const e = await resp.json();
               return { success: false, error: e.detail || 'Scraper call failed' };
@@ -451,7 +452,7 @@ function Dashboard() {
           inputSchema: { type: 'object', properties: { jobId: { type: 'integer' }, applied: { type: 'boolean' } }, required: ['jobId', 'applied'] },
           async execute(input) {
             try {
-              const resp = await fetch(`/api/jobs/${input.jobId}/apply`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ applied: input.applied }) });
+              const resp = await apiFetch(`/api/jobs/${input.jobId}/apply`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ applied: input.applied }) });
               if (resp.ok) {
                 setJobs(prev => prev.map(j => j.id === input.jobId ? { ...j, applied: input.applied } : j));
                 if (stateRef.current.selectedJob?.id === input.jobId) setSelectedJob(prev => ({ ...prev, applied: input.applied }));
@@ -468,7 +469,7 @@ function Dashboard() {
           inputSchema: { type: 'object', properties: {} },
           async execute() {
             try {
-              const resp = await fetch('/api/jobs/clear', { method: 'POST' });
+              const resp = await apiFetch('/api/jobs/clear', { method: 'POST' });
               if (resp.ok) { setJobs([]); setSelectedJob(null); return { success: true, message: 'Local jobs database cleared.' }; }
               return { success: false, error: 'Failed to clear on backend' };
             } catch (err) { return { success: false, error: err.message }; }
@@ -645,7 +646,7 @@ function Dashboard() {
               className="btn"
               onClick={async () => {
                 try {
-                  const resp = await fetch('/api/jobs/clear', { method: 'POST' });
+                  const resp = await apiFetch('/api/jobs/clear', { method: 'POST' });
                   if (resp.ok) {
                     setJobs([]);
                     setSelectedJob(null);

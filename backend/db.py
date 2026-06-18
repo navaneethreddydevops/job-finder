@@ -1,27 +1,123 @@
-import sqlite3
+"""Persistence layer.
+
+Supports two backends transparently:
+
+* **SQLite** (default) — used for local development and tests. Zero setup; the file
+  lives next to this module (or at ``DATABASE_PATH``). Keeps ``uv run`` and the
+  FastAPI ``TestClient`` workflow friction-free.
+* **Postgres / Neon** — used in production (e.g. Render). Activated automatically when
+  ``DATABASE_URL`` is a ``postgres://`` / ``postgresql://`` connection string.
+
+The two drivers differ in small ways (``?`` vs ``%s`` placeholders, ``lastrowid`` vs
+``RETURNING``, ``AUTOINCREMENT`` vs identity columns, ``BLOB`` vs ``BYTEA``). A thin
+wrapper around the connection/cursor smooths over the placeholder difference so the rest
+of the codebase can keep writing ``?``-style SQL, and the few remaining differences are
+exposed as the ``IS_POSTGRES`` / ``AUTO_PK`` / ``BLOB_TYPE`` constants and the
+``insert_returning_id`` helper.
+"""
+
 import json
 import os
+import sqlite3
 
-DB_PATH = os.getenv("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "jobs.db"))
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+IS_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 
-# Ensure the directory for the database exists
-db_dir = os.path.dirname(DB_PATH)
-if db_dir:
-    os.makedirs(db_dir, exist_ok=True)
+# Backend-specific DDL fragments. The rest of the SQL is portable.
+AUTO_PK = (
+    "INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY"
+    if IS_POSTGRES
+    else "INTEGER PRIMARY KEY AUTOINCREMENT"
+)
+BLOB_TYPE = "BYTEA" if IS_POSTGRES else "BLOB"
+
+
+# ---------------------------------------------------------------------------
+# SQLite-only path setup
+# ---------------------------------------------------------------------------
+if not IS_POSTGRES:
+    DB_PATH = os.getenv(
+        "DATABASE_PATH", os.path.join(os.path.dirname(__file__), "jobs.db")
+    )
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Postgres connection wrappers
+#
+# psycopg uses %s placeholders; the rest of the codebase writes ? placeholders.
+# These wrappers translate on the way through so call sites stay backend-agnostic.
+# (No SQL in this project contains a literal '?', so the substitution is safe.)
+# ---------------------------------------------------------------------------
+class _PgCursor:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def execute(self, sql, params=()):
+        return self._cur.execute(sql.replace("?", "%s"), params)
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+
+class _PgConnection:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return _PgCursor(self._conn.cursor())
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
 
 def get_db_connection():
+    if IS_POSTGRES:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        return _PgConnection(conn)
+
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
+def insert_returning_id(cursor, sql, params, id_col="id"):
+    """Run an INSERT and return the new primary key on both backends.
+
+    ``sql`` must NOT include a RETURNING clause — it is appended for Postgres.
+    """
+    if IS_POSTGRES:
+        cursor.execute(sql + f" RETURNING {id_col}", params)
+        return cursor.fetchone()[id_col]
+    cursor.execute(sql, params)
+    return cursor.lastrowid
+
+
+def _column_exists(cursor, table, column):
+    """Backend-agnostic check for whether a column already exists."""
+    if IS_POSTGRES:
+        cursor.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = ? AND column_name = ?",
+            (table, column),
+        )
+        return cursor.fetchone() is not None
+    cursor.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cursor.fetchall())
+
+
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        f"""
         CREATE TABLE IF NOT EXISTS jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             user_id INTEGER NOT NULL,
             title TEXT,
             company TEXT,
@@ -38,44 +134,52 @@ def init_db():
             posted_within_24h INTEGER DEFAULT 0,
             UNIQUE(user_id, url)
         )
-    """)
-    # Migrate existing databases that predate the posted_within_24h column.
-    cursor.execute("PRAGMA table_info(jobs)")
-    existing_cols = {row[1] for row in cursor.fetchall()}
-    if "posted_within_24h" not in existing_cols:
-        cursor.execute(
-            "ALTER TABLE jobs ADD COLUMN posted_within_24h INTEGER DEFAULT 0"
-        )
-    # Migrate existing databases that predate the user_id column.
-    if "user_id" not in existing_cols:
-        cursor.execute(
-            "ALTER TABLE jobs ADD COLUMN user_id INTEGER"
-        )
-        # Delete all existing jobs (clean slate for multi-tenant)
-        cursor.execute("DELETE FROM jobs WHERE user_id IS NULL")
-        # Add NOT NULL constraint by recreating table with proper schema
-        cursor.execute("""
-            CREATE TABLE jobs_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                title TEXT,
-                company TEXT,
-                location TEXT,
-                url TEXT,
-                date_posted TEXT,
-                c2c_viability TEXT,
-                key_requirements TEXT,
-                contact_email TEXT,
-                contact_phone TEXT,
-                source TEXT,
-                description TEXT,
-                applied INTEGER DEFAULT 0,
-                posted_within_24h INTEGER DEFAULT 0,
-                UNIQUE(user_id, url)
+        """
+    )
+
+    if IS_POSTGRES:
+        # Fresh Neon databases are created with the full schema above; only guard
+        # against an older deployment missing the newest column.
+        if not _column_exists(cursor, "jobs", "posted_within_24h"):
+            cursor.execute(
+                "ALTER TABLE jobs ADD COLUMN posted_within_24h INTEGER DEFAULT 0"
             )
-        """)
-        cursor.execute("DROP TABLE jobs")
-        cursor.execute("ALTER TABLE jobs_new RENAME TO jobs")
+    else:
+        # Legacy SQLite databases may predate some columns — migrate in place.
+        if not _column_exists(cursor, "jobs", "posted_within_24h"):
+            cursor.execute(
+                "ALTER TABLE jobs ADD COLUMN posted_within_24h INTEGER DEFAULT 0"
+            )
+        if not _column_exists(cursor, "jobs", "user_id"):
+            cursor.execute("ALTER TABLE jobs ADD COLUMN user_id INTEGER")
+            # Clean slate for multi-tenant: drop pre-user_id rows and rebuild with
+            # the NOT NULL + UNIQUE(user_id, url) constraints.
+            cursor.execute("DELETE FROM jobs WHERE user_id IS NULL")
+            cursor.execute(
+                """
+                CREATE TABLE jobs_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    title TEXT,
+                    company TEXT,
+                    location TEXT,
+                    url TEXT,
+                    date_posted TEXT,
+                    c2c_viability TEXT,
+                    key_requirements TEXT,
+                    contact_email TEXT,
+                    contact_phone TEXT,
+                    source TEXT,
+                    description TEXT,
+                    applied INTEGER DEFAULT 0,
+                    posted_within_24h INTEGER DEFAULT 0,
+                    UNIQUE(user_id, url)
+                )
+                """
+            )
+            cursor.execute("DROP TABLE jobs")
+            cursor.execute("ALTER TABLE jobs_new RENAME TO jobs")
+
     conn.commit()
     conn.close()
 

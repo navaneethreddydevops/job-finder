@@ -22,6 +22,11 @@ key. `agent.py` drops `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the en
 at import time so the SDK-spawned CLI uses its own OAuth login. No API key is required to
 run this project.
 
+**In the cloud (Render):** there is no interactive `claude login`, so OAuth is supplied via the
+`CLAUDE_CODE_OAUTH_TOKEN` env var (minted locally with `claude setup-token`). The SDK/CLI honor
+it and `agent.py` does **not** drop it — only the API-key vars are dropped. Still OAuth, still no
+API key. See `render.yaml`, `backend/Dockerfile.render`, and the README "Cloud Deployment" section.
+
 ---
 
 ## Agent Configuration

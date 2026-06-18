@@ -1,0 +1,29 @@
+# Render Blueprint for the Job Finder backend.
+#
+# Deploy: connect this repo as a Blueprint in the Render dashboard. Render auto-deploys
+# on every push to the default branch (native Git integration — no secrets in the repo).
+#
+# Secrets to set in the Render dashboard (sync: false → prompted, never stored in git):
+#   CLAUDE_CODE_OAUTH_TOKEN  Long-lived Claude OAuth token. Generate locally with
+#                            `claude setup-token` and paste it in. OAuth only — never an API key.
+#   DATABASE_URL             Neon Postgres connection string (include ?sslmode=require).
+#                            When unset, the backend falls back to a local SQLite file
+#                            (ephemeral on Render — data resets on each deploy).
+services:
+  - type: web
+    name: job-finder-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile.render
+    dockerContext: .
+    plan: starter
+    region: oregon
+    branch: master
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: CLAUDE_CODE_OAUTH_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"
