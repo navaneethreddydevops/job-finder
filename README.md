@@ -143,6 +143,49 @@ docker compose exec backend bash
 
 ---
 
+## Cloud Deployment — Vercel (frontend) + Render (backend) + Neon (database)
+
+The app deploys as two services that talk over HTTPS, with Postgres on Neon. Deploys are
+driven by **native Git integration** — pushing to `master` auto-deploys both sides; there are
+no deploy secrets in the repo.
+
+```
+Vercel (static React)  ──HTTPS──▶  Render (FastAPI + claude CLI)  ──▶  Neon (Postgres)
+   VITE_API_BASE_URL              CLAUDE_CODE_OAUTH_TOKEN, DATABASE_URL
+```
+
+### 1. Database — Neon
+Create a Neon Postgres database and copy its connection string (with `?sslmode=require`).
+The backend auto-detects Postgres from `DATABASE_URL`; with no `DATABASE_URL` it falls back to
+local SQLite. Schema/tables are created automatically on first boot (`init_db` / `init_auth_db` /
+`init_resume_db`), including the seeded `test@test.com` user.
+
+### 2. Backend — Render
+Defined in [`render.yaml`](render.yaml) (Blueprint) using [`backend/Dockerfile.render`](backend/Dockerfile.render),
+which installs the Python deps **plus Node.js + the Claude Code CLI** (the Agent SDK shells out to `claude`).
+
+1. In Render, **New ▸ Blueprint** and point it at this repo.
+2. Set the two secret env vars (Blueprint marks them `sync: false`):
+   - `CLAUDE_CODE_OAUTH_TOKEN` — generate locally with **`claude setup-token`** and paste it in.
+     OAuth only; never an API key.
+   - `DATABASE_URL` — the Neon connection string from step 1.
+3. Deploy. Health check: `GET /api/health`. Render injects `$PORT`; uvicorn binds it.
+
+> Render's filesystem is ephemeral, which is why persistence lives in Neon. The resume
+> optimizer's `docx` skill isn't shipped in the image (`.claude/` is excluded from the build
+> context for credential safety), so it uses the deterministic python-docx fallback in production.
+
+### 3. Frontend — Vercel
+Defined in [`frontend/vercel.json`](frontend/vercel.json) (Vite preset, SPA rewrites).
+
+1. In Vercel, import the repo with **Root Directory = `frontend`**.
+2. Set env var `VITE_API_BASE_URL` to the Render backend origin
+   (e.g. `https://job-finder-api.onrender.com`, no trailing slash). It's baked in at build time.
+3. Deploy. The frontend calls the backend cross-origin; CORS is already open on the backend and
+   auth uses bearer tokens (no cookies).
+
+See [`.env.example`](.env.example) for the full list of deployment variables.
+
 ## Further Documentation
 * For Docker deployment and troubleshooting, see [DOCKER.md](DOCKER.md) and [DOCKER-QUICKREF.md](DOCKER-QUICKREF.md).
 * For agent design, tools, and the response schema, see [AGENTS.md](AGENTS.md).

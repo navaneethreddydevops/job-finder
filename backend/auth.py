@@ -1,6 +1,7 @@
 """Authentication: user accounts, sessions, and profile management.
 
-Uses the same SQLite database as the jobs store. Passwords are hashed with
+Uses the same database as the jobs store (SQLite locally, Postgres/Neon in
+production — see ``db.py``). Passwords are hashed with
 PBKDF2-HMAC-SHA256 (stdlib only, no external crypto deps). Bearer tokens are random
 url-safe strings persisted in an `auth_sessions` table.
 
@@ -16,7 +17,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from db import get_db_connection
+from db import AUTO_PK, get_db_connection, insert_returning_id
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PBKDF2_ROUNDS = 200_000
@@ -33,9 +34,9 @@ def init_auth_db():
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             salt TEXT NOT NULL,
@@ -112,7 +113,8 @@ def create_user(email: str, password: str, full_name: str = "", phone: str = "")
     password_hash = _hash_password(password, salt)
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(
+    user_id = insert_returning_id(
+        cur,
         """INSERT INTO users (email, password_hash, salt, full_name, phone, created_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (
@@ -125,7 +127,6 @@ def create_user(email: str, password: str, full_name: str = "", phone: str = "")
         ),
     )
     conn.commit()
-    user_id = cur.lastrowid
     conn.close()
     return _row_to_user(get_user_by_id(user_id))
 

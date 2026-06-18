@@ -529,8 +529,42 @@ time, which is already derivable from the `jobs` array returned by `GET /api/job
 
 ---
 
+## Task 7 — Cloud deployment pipeline (Vercel + Render + Neon)
+
+Goal: ship the app as two managed services — static frontend on **Vercel**, FastAPI backend on
+**Render** — backed by **Neon Postgres**, deployed via native Git integration (push to `master`
+auto-deploys; no deploy secrets in the repo). ☑ done.
+
+### 7.1 — Dual-backend persistence (`backend/db.py`)
+- `db.py` runs on SQLite by default (local/tests) and on Postgres when `DATABASE_URL` is a
+  `postgres(ql)://` string. Exposes `IS_POSTGRES`, `AUTO_PK`, `BLOB_TYPE`, and
+  `insert_returning_id()`; a connection wrapper rewrites `?` → `%s` for `psycopg`.
+- `auth.py` / `resume.py` use `AUTO_PK` / `BLOB_TYPE` in DDL, branch migrations on `IS_POSTGRES`,
+  and obtain new ids via `insert_returning_id`. Tables auto-create on boot — fresh Neon DB needs
+  no manual migration. The seeded `test@test.com` user is created on first startup either way.
+
+### 7.2 — Frontend API base (`frontend/src/auth.jsx`, `frontend/vercel.json`)
+- `API_BASE = import.meta.env.VITE_API_BASE_URL` (empty locally → Vite proxy; set to the Render
+  origin in Vercel). `apiUrl(path)` prepends the base; `apiFetch` adds it **and** the bearer token.
+- All call sites (Dashboard, auth, Profile, ResumeOptimizer) route through `apiUrl`/`apiFetch` —
+  no raw relative `fetch('/api/...')` / `EventSource('/api/...')`. Protected endpoints use
+  `apiFetch`; open endpoints (`/api/status`, `/api/health`, `/api/stream`) use `apiUrl`.
+- `vercel.json`: Vite framework preset, `npm ci` install, `dist` output, SPA rewrite (all
+  non-asset routes → `index.html`) for React Router.
+
+### 7.3 — Render backend (`render.yaml`, `backend/Dockerfile.render`)
+- `Dockerfile.render` builds the Python venv with `uv` **and** installs Node.js 20 + the Claude
+  Code CLI (`@anthropic-ai/claude-code`), since the Agent SDK spawns `claude`. Binds `$PORT`.
+- `render.yaml` Blueprint: docker runtime, health check `GET /api/health`, `autoDeploy: true`,
+  and two `sync: false` secrets — `CLAUDE_CODE_OAUTH_TOKEN` (OAuth-only auth, from
+  `claude setup-token`; never an API key) and `DATABASE_URL` (Neon).
+
+### 7.4 — Verification
+- Backend: FastAPI `TestClient` exercises auth + jobs endpoints against SQLite (Claude call
+  mocked); the dual-backend DB layer is smoke-tested. Frontend: `npm run build` + `npm run lint`.
+
 ## Dependencies added
-- **Python:** `python-docx` (docx parse/generate).
+- **Python:** `python-docx` (docx parse/generate), `psycopg[binary]` (Postgres/Neon driver).
 - **JS:** `react-router-dom` (routing), `docx-preview` (render .docx in browser).
 - **Fonts (CDN):** Inter (UI), Lora (serif display), monospace for the console — loaded in
   `frontend/index.html`; no new npm packages.

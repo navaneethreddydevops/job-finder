@@ -47,6 +47,26 @@ cd frontend && npm run dev
 cd frontend && npm run build && cd .. && uv run python backend/main.py
 ```
 
+## Cloud deployment — Vercel + Render + Neon
+
+Two services over HTTPS, Postgres on Neon, deployed via **native Git integration** (push to
+`master` auto-deploys; no deploy secrets in the repo). See README "Cloud Deployment" for steps.
+
+- **Frontend → Vercel.** [`frontend/vercel.json`](frontend/vercel.json) (Vite preset + SPA
+  rewrites), Root Directory = `frontend`. The frontend reaches the backend **cross-origin** via
+  `VITE_API_BASE_URL` (baked in at build time). All API calls go through `apiUrl()`/`apiFetch()`
+  in `frontend/src/auth.jsx` — `apiUrl(path)` prepends the base; `apiFetch` also attaches the
+  bearer token. **Never reintroduce raw `fetch('/api/...')` or `new EventSource('/api/...')`**;
+  use the helpers so the app works both behind the Vite proxy (local) and cross-origin (prod).
+  Auth-protected endpoints (`/api/jobs`, `/api/pull`, `/api/jobs/clear`, `/api/jobs/{id}/apply`)
+  must use `apiFetch`; open ones (`/api/status`, `/api/health`, `/api/stream`) use `apiUrl`.
+- **Backend → Render.** [`render.yaml`](render.yaml) Blueprint + [`backend/Dockerfile.render`](backend/Dockerfile.render),
+  which installs Python deps **plus Node.js + the Claude Code CLI** (the SDK spawns `claude`).
+  Auth stays **OAuth-only**: set `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) as a Render
+  secret — the SDK/CLI honor it and `agent.py` does not drop it. Never an API key. Binds `$PORT`.
+- **Database → Neon.** Set `DATABASE_URL` on Render (see Persistence above). `.claude/` is excluded
+  from the Docker build context, so the resume optimizer uses its python-docx fallback in prod.
+
 ## Authentication — OAuth only, never an API key
 
 **The backend must authenticate to Claude exclusively via the stored Claude OAuth
@@ -99,8 +119,17 @@ The agent uses Claude's built-in web tools directly — no MCP servers are confi
   board's last-24h recency filter.
 - `WebFetch` — opens and reads individual listings to verify dates and extract fields.
 
-## Persistence (`backend/db.py`, SQLite `jobs.db`)
+## Persistence (`backend/db.py` — dual backend: SQLite local, Postgres/Neon prod)
 
+- **`db.py` supports two backends transparently.** Default is SQLite (`jobs.db`) for local
+  dev and tests. When `DATABASE_URL` is a `postgres://`/`postgresql://` string (e.g. Neon on
+  Render), it switches to Postgres via `psycopg`. The exported `IS_POSTGRES`, `AUTO_PK`,
+  `BLOB_TYPE` constants and `insert_returning_id()` helper absorb the dialect differences, and a
+  thin connection wrapper translates `?` placeholders to `%s` so the rest of the code stays
+  backend-agnostic. **Keep new SQL `?`-style and route inserts-needing-an-id through
+  `insert_returning_id`** — do not hardcode `lastrowid`, `AUTOINCREMENT`, `PRAGMA`, or `BLOB`.
+  `auth.py` and `resume.py` follow this (DDL uses `AUTO_PK`/`BLOB_TYPE`; migrations branch on
+  `IS_POSTGRES`). Tables auto-create on boot, so a fresh Neon DB needs no manual migration.
 - De-duplication keys on the posting **URL**; when a job has no URL, a stable key is
   synthesized from `title|company|location` so URL-less jobs don't collide on the
   `UNIQUE(url)` constraint and collapse into one row.

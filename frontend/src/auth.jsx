@@ -6,13 +6,26 @@ const STORAGE_KEY = 'jf_auth';
 let currentToken = null;
 
 /**
+ * Base URL of the backend API. Empty in local dev (Vite proxies /api to :8000);
+ * set to the Render backend origin (e.g. https://job-finder-api.onrender.com) at
+ * build time via VITE_API_BASE_URL when the frontend is deployed to Vercel.
+ */
+export const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+
+/** Resolve a relative API path against API_BASE (leaves absolute URLs untouched). */
+export function apiUrl(path) {
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${API_BASE}${path}`;
+}
+
+/**
  * Fetch wrapper that attaches the bearer token. On a 401 it clears auth and
  * reloads so the user is bounced to the login screen.
  */
 export async function apiFetch(url, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (currentToken) headers['Authorization'] = `Bearer ${currentToken}`;
-  const resp = await fetch(url, { ...options, headers });
+  const resp = await fetch(apiUrl(url), { ...options, headers });
   if (resp.status === 401) {
     localStorage.removeItem(STORAGE_KEY);
     currentToken = null;
@@ -72,7 +85,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = useCallback(async (email, password) => {
-    const resp = await fetch('/api/login', {
+    const resp = await fetch(apiUrl('/api/login'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
@@ -84,7 +97,7 @@ export function AuthProvider({ children }) {
   }, [persist]);
 
   const register = useCallback(async (payload) => {
-    const resp = await fetch('/api/register', {
+    const resp = await fetch(apiUrl('/api/register'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
