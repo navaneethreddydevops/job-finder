@@ -41,7 +41,7 @@
   --danger: #e03e3e;
 
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-heading: 'Lora', Georgia, 'Times New Roman', serif;
+  --font-heading: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', ui-monospace, monospace;
 
   --transition-fast: 0.12s ease;
@@ -1480,8 +1480,8 @@ dialog.job-details-dialog[open]::backdrop {
 
 .onboarding-banner {
   position: relative;
-  background: var(--primary-glow);
-  border: 1px solid rgba(35,131,226,0.18);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 1.1rem 2.5rem 1.1rem 1.25rem;
   margin-bottom: 0.5rem;
@@ -1827,26 +1827,12 @@ dialog.job-details-dialog[open]::backdrop {
   margin-bottom: 2rem;
 }
 
-.stat-card {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-left: 4px solid;
-  border-radius: 8px;
-  padding: 1.5rem;
-  box-shadow: 0 1px 3px var(--shadow);
-  transition: all 0.2s ease;
-}
-
-.stat-card:hover {
-  box-shadow: 0 4px 12px var(--shadow);
-  transform: translateY(-2px);
-}
-
 .stat-card h3 {
-  font-size: 0.9rem;
+  font-size: 0.72rem;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-tertiary);
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  color: var(--text-secondary);
   margin-bottom: 0.5rem;
 }
 
@@ -2105,7 +2091,6 @@ dialog.job-details-dialog[open]::backdrop {
   text-align: center;
   color: var(--text-secondary);
   padding: 2rem 1rem;
-  font-style: italic;
 }
 
 .toast {

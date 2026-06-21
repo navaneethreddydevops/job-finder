@@ -265,7 +265,8 @@ handling ad hoc.
   `frontend/src/index.css` as the single source of truth, driven by `:root` CSS custom
   properties (`--primary`, `--text-*`, `--border`, `--*-glow`, …) and semantic class names
   shared across every page; component JSX references these tokens (incl. inline styles), so
-  re-theme by editing the variables/classes rather than the components. Fonts (Inter UI + Lora
-  serif display + JetBrains Mono) load via CDN in `frontend/index.html`. Keep it light, flat,
+  re-theme by editing the variables/classes rather than the components. Typography is all-sans
+  for a clean Notion feel: both `--font-sans` and `--font-heading` resolve to Inter (JetBrains
+  Mono for code) loaded via CDN in `frontend/index.html`. Keep it light, flat,
   and restrained (hairlines, soft shadows, small radii). When changing the look, update
   `app_spec.md` Task 4 and keep element `id`s intact (WebMCP/agent tooling depends on them).
