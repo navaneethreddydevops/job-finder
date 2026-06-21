@@ -20,10 +20,17 @@ import {
   ChevronUp,
   Copy,
   Clock,
+  BarChart3,
+  Settings as SettingsIcon,
 } from 'lucide-react';
 import UserMenu from './components/UserMenu.jsx';
 import { useToast } from './components/Toast.jsx';
+import ApplicationStatus from './components/ApplicationStatus.jsx';
+import ThemeToggle from './components/ThemeToggle.jsx';
+import ExportButton from './components/ExportButton.jsx';
 import { apiFetch, apiUrl } from './auth';
+import { useDarkMode } from './hooks/useDarkMode';
+import { Heart } from 'lucide-react';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -68,6 +75,8 @@ function AnimatedNumber({ value }) {
 
 function Dashboard() {
   const { addToast } = useToast();
+  // Initialize dark mode (just calling to set up the theme)
+  useDarkMode();
 
   const [jobs, setJobs] = useState([]);
   const [jobsLoading, setJobsLoading] = useState(true);
@@ -77,6 +86,13 @@ function Dashboard() {
   const [selectedJob, setSelectedJob] = useState(null);
   const [activeAgentTool, setActiveAgentTool] = useState(null);
   const [healthStatus, setHealthStatus] = useState('unknown');
+  const [appStats, setAppStats] = useState({
+    total_applications: 0,
+    applied_count: 0,
+    interviewing_count: 0,
+    offer_count: 0,
+    rejected_count: 0,
+  });
 
   // filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -94,6 +110,8 @@ function Dashboard() {
   const [onboardingDismissed, setOnboardingDismissed] = useState(
     () => localStorage.getItem('jf_onboarded') === '1'
   );
+  const [showBookmarksOnly, setShowBookmarksOnly] = useState(false);
+  const [bookmarkCount, setBookmarkCount] = useState(0);
 
   const JOBS_PER_PAGE = 12;
 
@@ -136,6 +154,55 @@ function Dashboard() {
       console.error('Failed to fetch jobs:', err);
     } finally {
       setJobsLoading(false);
+    }
+  };
+
+  const fetchAppStats = async () => {
+    try {
+      const resp = await apiFetch('/api/applications/stats');
+      if (resp.ok) {
+        const stats = await resp.json();
+        setAppStats(stats);
+      }
+    } catch (err) {
+      console.error('Failed to fetch application stats:', err);
+    }
+  };
+
+  const fetchBookmarkCount = async () => {
+    try {
+      const resp = await apiFetch('/api/bookmarks/count');
+      if (resp.ok) {
+        const data = await resp.json();
+        setBookmarkCount(data.count);
+      }
+    } catch (err) {
+      console.error('Failed to fetch bookmark count:', err);
+    }
+  };
+
+  const handleToggleBookmark = async (jobId, isCurrentlyBookmarked) => {
+    try {
+      const resp = await apiFetch(`/api/jobs/${jobId}/bookmark`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        setJobs(prev =>
+          prev.map(j =>
+            j.id === jobId ? { ...j, is_bookmarked: data.is_bookmarked } : j
+          )
+        );
+        if (selectedJob?.id === jobId) {
+          setSelectedJob(prev => ({ ...prev, is_bookmarked: data.is_bookmarked }));
+        }
+        fetchBookmarkCount();
+        addToast(data.message, 'success');
+      }
+    } catch (err) {
+      addToast('Failed to toggle bookmark', 'error');
+      console.error('Error toggling bookmark:', err);
     }
   };
 
@@ -237,6 +304,8 @@ function Dashboard() {
 
   useEffect(() => {
     fetchJobs();
+    fetchAppStats();
+    fetchBookmarkCount();
     fetchStatus();
     return () => { if (eventSourceRef.current) eventSourceRef.current.close(); };
   }, []);
@@ -331,6 +400,7 @@ function Dashboard() {
 
   const filteredJobs = useMemo(() => {
     return jobs.filter(job => {
+      if (showBookmarksOnly && !job.is_bookmarked) return false;
       const sl = searchTerm.toLowerCase();
       const matchesSearch = !sl ||
         job.title.toLowerCase().includes(sl) ||
@@ -346,7 +416,7 @@ function Dashboard() {
         (selectedApplied === 'Applied' ? job.applied : !job.applied);
       return matchesSearch && matchesC2C && matchesSource && matchesLocation && matchesApplied;
     });
-  }, [jobs, searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied]);
+  }, [jobs, searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied, showBookmarksOnly]);
 
   useEffect(() => { setCurrentPage(1); },
     [searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied]);
@@ -361,7 +431,10 @@ function Dashboard() {
     confirmedC2C: jobs.filter(j => j.c2c_viability === 'Confirmed C2C').length,
     remote: jobs.filter(j => j.location.toLowerCase().includes('remote')).length,
     applied: jobs.filter(j => j.applied).length,
-  }), [jobs]);
+    applications: appStats.total_applications,
+    applied_apps: appStats.applied_count,
+    interviewing_apps: appStats.interviewing_count,
+  }), [jobs, appStats]);
 
   const lastUpdated = useMemo(() => {
     const dates = jobs.map(j => j.created_at).filter(Boolean).sort();
@@ -535,6 +608,20 @@ function Dashboard() {
             <span className="header-btn-label">Resume Optimizer</span>
           </Link>
 
+          <Link to="/analytics" className="btn nav-link" title="Analytics">
+            <BarChart3 size={16} />
+            <span className="header-btn-label">Analytics</span>
+          </Link>
+
+          <Link to="/settings" className="btn nav-link" title="Settings">
+            <SettingsIcon size={16} />
+            <span className="header-btn-label">Settings</span>
+          </Link>
+
+          {/* Action buttons */}
+          <ExportButton format="csv" />
+          <ThemeToggle />
+
           <UserMenu />
         </div>
       </header>
@@ -573,6 +660,30 @@ function Dashboard() {
             </span>
           </div>
         </div>
+
+        <div className="stat-card" id="stat-card-applications" title="Total application records created">
+          <div className={`stat-icon-wrapper ${stats.applications > 0 ? 'primary' : ''}`}>
+            <FileText size={22} />
+          </div>
+          <div className="stat-info">
+            <span className="stat-label">Applications</span>
+            <span className={`stat-value ${stats.applications > 0 ? 'stat-value-primary' : ''}`}>
+              <AnimatedNumber value={stats.applications} />
+            </span>
+          </div>
+        </div>
+
+        <div className="stat-card" id="stat-card-interviewing" title="Applications in interviewing stage">
+          <div className={`stat-icon-wrapper ${stats.interviewing_apps > 0 ? 'primary' : ''}`}>
+            <Cpu size={22} />
+          </div>
+          <div className="stat-info">
+            <span className="stat-label">Interviewing</span>
+            <span className={`stat-value ${stats.interviewing_apps > 0 ? 'stat-value-primary' : ''}`}>
+              <AnimatedNumber value={stats.interviewing_apps} />
+            </span>
+          </div>
+        </div>
       </section>
 
       {/* last-updated line */}
@@ -601,7 +712,7 @@ function Dashboard() {
             className="control-group"
             toolname="trigger_agent_run_form"
             tooldescription="Trigger a backend web scraper agent run to search for C2C job postings matching a specified search query"
-            toolautosubmit
+            toolautosubmit="true"
           >
             <label htmlFor="agent-query-input" className="control-label">Search Target</label>
             <input
@@ -806,6 +917,28 @@ function Dashboard() {
                   </div>
                 </div>
               )}
+
+              {/* Bookmarks toggle */}
+              <div className="control-group">
+                <label className="control-label">Bookmarks</label>
+                <div className="control-buttons">
+                  <button
+                    id="filter-bookmarks-all"
+                    className={`filter-pill ${!showBookmarksOnly ? 'active' : ''}`}
+                    onClick={() => setShowBookmarksOnly(false)}
+                  >
+                    All
+                  </button>
+                  <button
+                    id="filter-bookmarks-saved"
+                    className={`filter-pill ${showBookmarksOnly ? 'active' : ''}`}
+                    onClick={() => setShowBookmarksOnly(true)}
+                    title={`View ${bookmarkCount} bookmarked jobs`}
+                  >
+                    Saved {bookmarkCount > 0 && <span style={{ marginLeft: '0.25rem' }}>({bookmarkCount})</span>}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </aside>
@@ -864,7 +997,7 @@ function Dashboard() {
               style={{ position: 'relative', width: '260px' }}
               toolname="search_jobs_form"
               tooldescription="Search and filter the currently loaded jobs in the local dashboard UI"
-              toolautosubmit
+              toolautosubmit="true"
             >
               <input
                 id="local-search-input"
@@ -947,13 +1080,41 @@ function Dashboard() {
                           <h3 className="job-title">{job.title}</h3>
                           <span className="job-company">{job.company}</span>
                         </div>
+                        <ApplicationStatus
+                          jobId={job.id}
+                          applicationId={job.application_id}
+                          currentStatus={job.application_status || 'draft'}
+                          onStatusChange={(newStatus, appId) => {
+                            setJobs(prev =>
+                              prev.map(j =>
+                                j.id === job.id
+                                  ? { ...j, application_status: newStatus, application_id: appId }
+                                  : j
+                              )
+                            );
+                            fetchAppStats();
+                            addToast(`Status updated to ${newStatus}`, 'success');
+                          }}
+                          onError={(err) => addToast(err, 'error')}
+                        />
                         <button
-                          className={`btn-toggle-applied ${job.applied ? 'applied' : ''}`}
-                          onClick={(e) => { e.stopPropagation(); handleToggleApplied(job.id, job.applied); }}
-                          title={job.applied ? 'Mark as Not Applied' : 'Mark as Applied'}
-                          style={{ background: 'transparent', border: 'none', color: job.applied ? 'var(--success)' : 'var(--text-muted)', cursor: 'pointer', padding: '0.25rem', display: 'flex', alignItems: 'center', marginTop: '-0.25rem', marginRight: '-0.25rem' }}
+                          className={`btn-bookmark ${job.is_bookmarked ? 'bookmarked' : ''}`}
+                          onClick={(e) => { e.stopPropagation(); handleToggleBookmark(job.id, job.is_bookmarked); }}
+                          title={job.is_bookmarked ? 'Remove bookmark' : 'Bookmark job'}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: job.is_bookmarked ? '#ea4335' : 'var(--text-muted)',
+                            cursor: 'pointer',
+                            padding: '0.25rem',
+                            display: 'flex',
+                            alignItems: 'center',
+                            marginTop: '-0.25rem',
+                            marginRight: '-0.25rem',
+                            transition: 'color 0.2s',
+                          }}
                         >
-                          <CheckCircle2 size={18} fill={job.applied ? 'var(--success-glow)' : 'transparent'} />
+                          <Heart size={18} fill={job.is_bookmarked ? '#ea4335' : 'transparent'} />
                         </button>
                       </div>
 

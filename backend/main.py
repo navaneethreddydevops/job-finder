@@ -10,20 +10,60 @@ import sys
 
 sys.path.append(os.path.dirname(__file__))
 from agent import run_job_finder_agent
-from db import init_db, save_job, get_user_jobs, toggle_applied, delete_user_jobs
+from db import (
+    init_db,
+    save_job,
+    get_user_jobs,
+    toggle_applied,
+    delete_user_jobs,
+    get_application_stats,
+)
 from auth import init_auth_db, router as auth_router, get_current_user
 from resume import init_resume_db, router as resume_router
+from applications import router as applications_router
+from bookmarks import router as bookmarks_router
+from searches import router as searches_router
+from salary import router as salary_router
+from skills import router as skills_router
+from scoring import router as scoring_router, init_scoring_db
+from cover_letters import router as cover_letters_router, init_cover_letter_db
+from interviews import router as interviews_router, init_interview_db
+from comparison import router as comparison_router
+from analytics import router as analytics_router, init_analytics_db
+from email_service import router as email_router
+from webhooks import router as webhooks_router, init_webhooks_db
+from integrations import router as integrations_router, init_integrations_db
+from rate_limit import enforce_rate_limit, RateLimitConfig
 
 # Initialize database schema
 init_db()
 init_auth_db()
 init_resume_db()
+init_scoring_db()
+init_cover_letter_db()
+init_interview_db()
+init_analytics_db()
+init_webhooks_db()
+init_integrations_db()
 
 app = FastAPI(title="C2C Job Finder Backend")
 
-# Authentication + resume optimizer routes
+# All routers
 app.include_router(auth_router)
 app.include_router(resume_router)
+app.include_router(applications_router)
+app.include_router(bookmarks_router)
+app.include_router(searches_router)
+app.include_router(salary_router)
+app.include_router(skills_router)
+app.include_router(scoring_router)
+app.include_router(cover_letters_router)
+app.include_router(interviews_router)
+app.include_router(comparison_router)
+app.include_router(analytics_router)
+app.include_router(email_router)
+app.include_router(webhooks_router)
+app.include_router(integrations_router)
 
 # CORS middleware for local development
 app.add_middleware(
@@ -141,7 +181,24 @@ class ApplyRequest(BaseModel):
 async def get_jobs(user: dict = Depends(get_current_user)):
     """Returns the list of jobs for the authenticated user."""
     try:
+        from db import get_user_applications
+
         jobs = get_user_jobs(user["id"])
+        applications = get_user_applications(user["id"])
+
+        # Create a lookup map: job_id -> application status
+        app_map = {app["job_id"]: app for app in applications}
+
+        # Enrich each job with application status
+        for job in jobs:
+            app = app_map.get(job["id"])
+            if app:
+                job["application_status"] = app["status"]
+                job["application_id"] = app["id"]
+            else:
+                job["application_status"] = None
+                job["application_id"] = None
+
         return {"jobs": jobs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading database: {e}")
@@ -179,9 +236,92 @@ async def get_status():
     return agent_status
 
 
+@app.get("/api/applications/stats")
+async def get_application_stats_endpoint(user: dict = Depends(get_current_user)):
+    """Returns application statistics for the current user."""
+    try:
+        stats = get_application_stats(user["id"])
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading stats: {e}")
+
+
+@app.get("/api/jobs/export")
+async def export_jobs(
+    format: str = "csv",
+    user: dict = Depends(get_current_user),
+):
+    """Export jobs as CSV or JSON."""
+    try:
+        import json
+        import csv
+        import io
+        from datetime import datetime
+
+        jobs = get_user_jobs(user["id"])
+
+        if format.lower() == "json":
+            # Export as JSON
+            export_data = {
+                "exported_at": datetime.utcnow().isoformat(),
+                "total_jobs": len(jobs),
+                "jobs": jobs,
+            }
+            return export_data
+
+        elif format.lower() == "csv":
+            # Export as CSV
+            output = io.StringIO()
+            if jobs:
+                fieldnames = [
+                    "title",
+                    "company",
+                    "location",
+                    "source",
+                    "c2c_viability",
+                    "date_posted",
+                    "url",
+                    "applied",
+                ]
+                writer = csv.DictWriter(output, fieldnames=fieldnames)
+                writer.writeheader()
+                for job in jobs:
+                    writer.writerow(
+                        {
+                            "title": job.get("title", ""),
+                            "company": job.get("company", ""),
+                            "location": job.get("location", ""),
+                            "source": job.get("source", ""),
+                            "c2c_viability": job.get("c2c_viability", ""),
+                            "date_posted": job.get("date_posted", ""),
+                            "url": job.get("url", ""),
+                            "applied": "Yes" if job.get("applied") else "No",
+                        }
+                    )
+            return {
+                "csv": output.getvalue(),
+                "filename": f"jobs_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv",
+            }
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported format. Use 'csv' or 'json'",
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
 @app.post("/api/pull")
 async def pull_jobs(req: PullRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     """Triggers the job finder agent in the background for the authenticated user."""
+    # Enforce rate limit: max 1 agent run per 30 minutes per user
+    rate_limit_info = enforce_rate_limit(
+        user["id"],
+        "/api/pull",
+        limit=RateLimitConfig.PULL_AGENT,
+        window=RateLimitConfig.PULL_AGENT_WINDOW,
+    )
+
     global agent_status
     if agent_status["status"] == "running":
         raise HTTPException(
@@ -192,7 +332,14 @@ async def pull_jobs(req: PullRequest, background_tasks: BackgroundTasks, user: d
     agent_status["query"] = req.query
 
     background_tasks.add_task(run_agent_task, req.query, user["id"])
-    return {"message": "Job pulling started", "query": req.query}
+    return {
+        "message": "Job pulling started",
+        "query": req.query,
+        "rate_limit": {
+            "remaining": rate_limit_info["remaining"],
+            "reset_at": rate_limit_info["reset_at"],
+        },
+    }
 
 
 @app.get("/api/stream")

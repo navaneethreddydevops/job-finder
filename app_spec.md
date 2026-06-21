@@ -568,3 +568,688 @@ auto-deploys; no deploy secrets in the repo). ☑ done.
 - **JS:** `react-router-dom` (routing), `docx-preview` (render .docx in browser).
 - **Fonts (CDN):** Inter (UI), Lora (serif display), monospace for the console — loaded in
   `frontend/index.html`; no new npm packages.
+
+---
+
+# Future Enhancements & Roadmap
+
+This section outlines proposed features and improvements organized by priority and complexity. These enhancements build on the existing foundation and can be implemented incrementally.
+
+## Phase 1: High-Impact, Low-Effort Quick Wins (1-2 weeks)
+
+### 8.1 — Saved Searches & Smart Alerts
+**Impact:** ⭐⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2-3 days
+
+**Features:**
+- ☐ Save frequently-used search queries with custom names
+- ☐ Schedule saved searches to run daily/weekly automatically
+- ☐ Email digest of new matching jobs from saved searches
+- ☐ Badge notification in header when new jobs match saved searches
+- ☐ Optional SMS alerts via Twilio integration
+
+**Data Model:**
+```
+saved_searches table:
+- id, user_id, query, name, frequency (daily|weekly|manual)
+- is_active, created_at, last_run_at
+
+search_runs table:
+- id, saved_search_id, jobs_found_count, run_at, was_emailed
+```
+
+**Implementation:**
+- New router: `backend/searches.py` (CRUD for saved searches)
+- Scheduler: `backend/scheduler.py` (APScheduler for background runs)
+- Frontend page: `frontend/src/pages/SavedSearches.jsx`
+- New table: `saved_searches`, `search_runs` in `backend/db.py`
+
+---
+
+### 8.2 — Job Bookmarking & Favorites
+**Impact:** ⭐⭐⭐⭐ | **Complexity:** Low | **Effort:** 1 day
+
+**Features:**
+- ☐ Heart icon to bookmark jobs (persistent in DB)
+- ☐ Bookmarked jobs filter/tab in dashboard
+- ☐ Dedicated "My Bookmarks" page with count badge
+- ☐ Sync bookmarks across sessions
+
+**Data Model:**
+```
+bookmarks table:
+- id, user_id, job_id, created_at
+
+(jobs table addition)
+- is_bookmarked boolean (derived)
+```
+
+**Endpoints:**
+- `POST /api/jobs/{id}/bookmark` — toggle bookmark
+- `GET /api/bookmarks` — list user's bookmarked jobs
+
+**Implementation:**
+- Add bookmarks table to `backend/db.py`
+- New endpoints in `backend/main.py`
+- Heart icon toggle in `frontend/src/Dashboard.jsx`
+- Filter option for bookmarks
+
+---
+
+### 8.3 — Dark Mode Toggle
+**Impact:** ⭐⭐⭐ | **Complexity:** Low | **Effort:** 0.5 day
+
+**Features:**
+- ☐ Toggle button in header (sun/moon icon)
+- ☐ CSS dark theme variables (complementary to light theme)
+- ☐ Persist user preference to `localStorage`
+- ☐ Respect system `prefers-color-scheme` setting
+- ☐ Smooth transitions between modes
+
+**Implementation:**
+- Add `:root[data-theme="dark"]` color variables to `frontend/src/index.css`
+- Create `frontend/src/hooks/useDarkMode.js` hook
+- New component: `frontend/src/components/ThemeToggle.jsx`
+- Integrate into header across all pages
+
+---
+
+### 8.4 — Export Jobs to CSV/PDF
+**Impact:** ⭐⭐⭐ | **Complexity:** Low | **Effort:** 1 day
+
+**Features:**
+- ☐ Export current filtered job list as CSV
+- ☐ Export as formatted PDF
+- ☐ Include metadata (query, timestamp, total count, filters applied)
+- ☐ Export bookmarks only option
+
+**Endpoints:**
+- `GET /api/jobs/export?format=csv|pdf&filters=...`
+
+**Implementation:**
+- Backend: Export handler in `backend/main.py`
+- Python: `reportlab` for PDF generation
+- Frontend: Export button in dashboard toolbar
+- Use `papaparse` for CSV formatting on frontend
+
+**Dependencies:**
+- `reportlab` (Python PDF generation)
+- `papaparse` (JS CSV handling)
+
+---
+
+### 8.5 — Application Status Tracking
+**Impact:** ⭐⭐⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2 days
+
+**Features:**
+- ☐ Track application lifecycle: `draft → applied → interviewing → offer → rejected`
+- ☐ Store cover letter with each application
+- ☐ Timeline of status changes with dates
+- ☐ Dashboard stats updated: "Applied: 5, Interviews: 2, Offers: 1"
+- ☐ Filter jobs by application status
+- ☐ Application history view with timestamps
+
+**Data Model:**
+```
+applications table:
+- id, user_id, job_id, status (enum), cover_letter (text)
+- applied_at, created_at, updated_at
+
+application_history table:
+- id, application_id, old_status, new_status, notes, changed_at
+```
+
+**Endpoints:**
+- `POST /api/applications` — create application
+- `PATCH /api/applications/{id}` — update status
+- `GET /api/applications` — list user's applications with history
+
+**Implementation:**
+- New tables in `backend/db.py`
+- New router: `backend/applications.py`
+- Status dropdown on job cards in Dashboard
+- Application detail modal with history timeline
+- Status filter in dashboard
+
+---
+
+## Phase 2: Smart Matching & Intelligence (2-3 weeks)
+
+### 9.1 — Skills Extraction & Gap Analysis
+**Impact:** ⭐⭐⭐⭐ | **Complexity:** High | **Effort:** 3-4 days
+
+**Features:**
+- ☐ Extract required skills from job descriptions via Claude
+- ☐ Compare against user's resume skills
+- ☐ Highlight skills gaps with proficiency levels
+- ☐ Suggest learning resources for missing skills
+- ☐ Skill proficiency tracking (beginner/intermediate/expert)
+- ☐ Endorsement system for skills
+
+**Data Model:**
+```
+user_skills table:
+- id, user_id, skill, proficiency (beginner|intermediate|expert), endorsed_count, years_of_exp
+
+job_skills table:
+- id, job_id, skill, is_required (boolean), extracted_at
+
+skill_suggestions table:
+- id, user_id, skill, course_url, platform, difficulty_level
+```
+
+**Implementation:**
+- Enhance agent prompts to extract and structure skills
+- New router: `backend/skills.py`
+- Skills section in Profile page: `frontend/src/pages/Profile.jsx`
+- Gap analysis component: `frontend/src/components/SkillsGapAnalysis.jsx`
+- Show skills gaps on job detail modal
+
+---
+
+### 9.2 — Job Matching Score & Recommendations
+**Impact:** ⭐⭐⭐⭐⭐ | **Complexity:** High | **Effort:** 3-5 days
+
+**Features:**
+- ☐ ML-based job match score (0-100) per job per user
+- ☐ Factors: skill overlap, experience level, location fit, company fit
+- ☐ Sort jobs by match score
+- ☐ "Top matches today" widget on dashboard
+- ☐ Match breakdown tooltip (why this score)
+- ☐ User preference form: locations, experience level, industries, remote preference
+
+**Data Model:**
+```
+job_match_scores table:
+- id, job_id, user_id, match_score (0-100)
+- skill_overlap, level_fit, location_fit, company_fit (json components)
+- calculated_at
+
+user_preferences table:
+- id, user_id, preferred_locations (json), experience_level
+- industries (json), remote_only, salary_min, salary_max, updated_at
+```
+
+**Implementation:**
+- Scoring engine: `backend/scoring.py` (rule-based initially, ML-ready)
+- Preference form in Profile: `frontend/src/pages/Profile.jsx`
+- Sort filter in Dashboard
+- Top matches widget
+- Use `scikit-learn` if ML-based scoring is added
+
+---
+
+### 9.3 — Salary Extraction & Estimation
+**Impact:** ⭐⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2-3 days
+
+**Features:**
+- ☐ Extract salary ranges from job descriptions
+- ☐ Estimate salary via Claude when range unavailable
+- ☐ Display salary on job cards (show range if available)
+- ☐ Filter by salary range
+- ☐ Salary trends dashboard (by location/role)
+
+**Data Model:**
+```
+job_salaries table:
+- id, job_id, salary_min, salary_max, currency
+- is_extracted (boolean), confidence_score, extracted_at
+```
+
+**Implementation:**
+- Enhance scout prompts to extract salary
+- Fallback Claude call for estimation
+- Display salary on job cards and modal
+- Salary range filter in dashboard
+- Salary stats widget
+
+---
+
+### 9.4 — Company Research & Insights
+**Impact:** ⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2-3 days
+
+**Features:**
+- ☐ Fetch company metadata (size, industry, founding year, funding)
+- ☐ Glassdoor ratings integration (fetched via WebFetch)
+- ☐ Recent company news/LinkedIn integration
+- ☐ Employee count and growth trajectory
+- ☐ Company card sidebar in job details
+
+**Data Model:**
+```
+company_info table:
+- id, company_name, website, industry, size, founding_year
+- total_funding, latest_funding, glassdoor_rating, reviews_count
+- updated_at, cached_until
+```
+
+**Implementation:**
+- New router: `backend/companies.py`
+- Web fetch integration for company data
+- Cache with 30-day TTL
+- Company sidebar: `frontend/src/components/CompanyCard.jsx`
+- Integrate into job detail modal
+
+---
+
+## Phase 3: Advanced Workflow & Integration (3-4 weeks)
+
+### 10.1 — Cover Letter Generation & Templates
+**Impact:** ⭐⭐⭐⭐ | **Complexity:** High | **Effort:** 3-4 days
+
+**Features:**
+- ☐ Generate personalized cover letters via Claude
+- ☐ Store multiple templates (generic + industry-specific)
+- ☐ In-place cover letter editor in UI
+- ☐ Download cover letter as PDF + .docx
+- ☐ Link cover letter to application
+
+**Data Model:**
+```
+cover_letters table:
+- id, user_id, job_id, content, template_id
+- generated_at, last_edited_at
+
+cover_templates table:
+- id, user_id, name, content_template, is_default, industry_tag
+```
+
+**Implementation:**
+- Claude prompt: personalize from JD + resume + profile
+- New router: `backend/cover_letters.py`
+- Editor component: `frontend/src/components/CoverLetterGenerator.jsx`
+- Library page: `frontend/src/pages/CoverLetterLibrary.jsx`
+- PDF download using `reportlab`
+
+---
+
+### 10.2 — Interview Scheduler & Reminders
+**Impact:** ⭐⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2-3 days
+
+**Features:**
+- ☐ Calendar view of scheduled interviews
+- ☐ Add interview to application timeline
+- ☐ Set reminders (1 day before, 1 hour before)
+- ☐ Email + in-app notifications
+- ☐ Export interview schedule to Google Calendar / Outlook
+
+**Data Model:**
+```
+interviews table:
+- id, application_id, scheduled_at, interview_type (phone|video|onsite)
+- notes, reminder_sent, meeting_link, created_at
+
+reminders table:
+- id, interview_id, remind_at, type (email|notification), sent (boolean)
+```
+
+**Implementation:**
+- New router: `backend/interviews.py`
+- Calendar component: `frontend/src/pages/Calendar.jsx`
+- Interview scheduler modal: `frontend/src/components/InterviewScheduler.jsx`
+- Notification system: `backend/notifications.py`
+- Calendar export integration (iCal format)
+- Use `react-big-calendar` or similar
+
+---
+
+### 10.3 — Multiple Resume Versions
+**Impact:** ⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2 days
+
+**Features:**
+- ☐ Store multiple resume versions (e.g., "Data Engineer", "ML Engineer")
+- ☐ Quick-swap between versions
+- ☐ Version history with rollback capability
+- ☐ Clone existing resume as template
+- ☐ Tag resumes by role/focus area
+
+**Data Model:**
+```
+resumes table:
+- id, user_id, name, docx_blob, is_default
+- role_tag, created_at, updated_at
+
+resume_versions table:
+- id, resume_id, version_number, snapshot_docx, created_at, note
+```
+
+**Implementation:**
+- Enhance `backend/resume.py` to support multiple versions
+- Version selector in Resume Optimizer
+- Resume library: `frontend/src/components/ResumeLibrary.jsx`
+- Version history sidebar
+- Endpoint: `GET/POST /api/resumes` for version management
+
+---
+
+### 10.4 — Job Comparison Tool
+**Impact:** ⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2-3 days
+
+**Features:**
+- ☐ Side-by-side job comparison (title, salary, benefits, company, location)
+- ☐ Weighted scoring for custom priorities
+- ☐ "Add to comparison" action on job cards
+- ☐ Comparison export to PDF
+- ☐ Visual comparison charts (salary, benefits, commute)
+
+**Implementation:**
+- Comparison state in Dashboard
+- Component: `frontend/src/components/JobComparison.jsx`
+- Comparison panel sidebar (show/hide)
+- PDF export endpoint: `GET /api/jobs/compare/export`
+- Use `recharts` for comparison visualizations
+
+---
+
+## Phase 4: Analytics & Insights (2-3 weeks)
+
+### 11.1 — Dashboard Analytics & Job Market Insights
+**Impact:** ⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2-3 days
+
+**Features:**
+- ☐ Job market heatmap (top locations, trending skills, company hiring)
+- ☐ Personal stats over time (applications sent, interview rate, offer rate)
+- ☐ Salary trends by location/role/company
+- ☐ Time-to-fill analytics (how long jobs stay posted)
+- ☐ Skills demand radar chart
+
+**Data Model:**
+```
+analytics_snapshots table:
+- id, user_id, snapshot_date, applications_count, interviews_count
+- offers_count, skills_snapshot (json)
+
+market_trends table:
+- id, snapshot_date, trending_skills (json), top_locations (json)
+- avg_salary_by_role (json), total_jobs_posted
+```
+
+**Implementation:**
+- Analytics router: `backend/analytics.py`
+- Nightly aggregation job to build trends
+- Analytics page: `frontend/src/pages/Analytics.jsx`
+- Charts using `recharts` library
+- Historical graphs for user metrics
+
+---
+
+### 11.2 — Job Board Performance Metrics
+**Impact:** ⭐⭐⭐ | **Complexity:** Low | **Effort:** 1 day
+
+**Features:**
+- ☐ Track best-performing job boards (most applications/offers)
+- ☐ Response time metrics by source
+- ☐ Quality score per board (% matches > 70%)
+- ☐ Board recommendations: "LinkedIn has been your best source"
+
+**Implementation:**
+- Board metrics calculations in `backend/analytics.py`
+- Visualization in Analytics page
+- Performance comparison chart
+
+---
+
+## Phase 5: Advanced Integration & Automation (3-4 weeks)
+
+### 12.1 — Email Integration & Digest
+**Impact:** ⭐⭐⭐⭐ | **Complexity:** High | **Effort:** 3-4 days
+
+**Features:**
+- ☐ Daily/weekly email digest of matching jobs
+- ☐ Personalized based on saved searches + preferences
+- ☐ One-click apply links in email
+- ☐ Unsubscribe management
+- ☐ Professional HTML email templates with branding
+
+**Implementation:**
+- Email service: `backend/email.py` (SendGrid/Mailgun integration)
+- Email template system
+- Digest scheduler using APScheduler
+- Unsubscribe token tracking in DB
+- Settings page for email preferences: `frontend/src/pages/Settings.jsx`
+- Dependencies: `sendgrid` or `mailgun_python`
+
+---
+
+### 12.2 — Webhook & JSON Feed API
+**Impact:** ⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2-3 days
+
+**Features:**
+- ☐ JSON API feed of jobs (filterable by query/source/date)
+- ☐ Webhooks when new matching jobs found
+- ☐ API key authentication and management
+- ☐ Rate limiting per API key
+- ☐ Webhook delivery logs and retry logic
+
+**Data Model:**
+```
+api_keys table:
+- id, user_id, key, name, rate_limit, created_at, last_used_at
+
+webhooks table:
+- id, user_id, url, events (json), is_active, created_at
+
+webhook_deliveries table:
+- id, webhook_id, payload (json), status_code, response
+- delivered_at, retry_count
+```
+
+**Endpoints:**
+- `GET /api/v1/jobs/feed?query=...&format=json|xml`
+- `POST /api/webhooks` — create webhook
+- `GET /api/api-keys` — manage API keys
+
+**Implementation:**
+- Feed endpoint in `backend/main.py`
+- Webhook delivery system: `backend/webhooks.py`
+- API key management in Settings page
+- Dependencies: `python-dateutil` for formatting
+
+---
+
+### 12.3 — Slack/Discord Integration
+**Impact:** ⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2-3 days
+
+**Features:**
+- ☐ Send new matching jobs to Slack channel
+- ☐ Discord webhook for notifications
+- ☐ Configurable filters per channel
+- ☐ Rich job card formatting with metadata
+- ☐ One-click "Apply" button in Slack
+
+**Implementation:**
+- Integration service: `backend/integrations.py`
+- Slack/Discord API integration
+- Webhook URLs stored in user settings
+- Formatting: use message blocks/embeds for rich cards
+- Settings page for integration URLs
+
+---
+
+## Phase 6: Performance & Reliability (2 weeks)
+
+### 13.1 — Caching & Performance Optimization
+**Impact:** ⭐⭐⭐ | **Complexity:** Medium | **Effort:** 2-3 days
+
+**Features:**
+- ☐ Redis cache for job results (24h TTL)
+- ☐ Query result caching (save common searches)
+- ☐ Frontend state caching improvements
+- ☐ Database query optimization (indexes on frequently-queried columns)
+- ☐ CDN optimization for static assets
+
+**Implementation:**
+- Caching layer: `backend/cache.py` with Redis
+- Cache decorator for agent runner
+- Database indexes: `url`, `source`, `created_at`, `user_id`
+- Frontend: aggressive localStorage usage
+- Docker: add Redis service to compose
+- Dependencies: `redis`, `python-redis`
+
+---
+
+### 13.2 — Retry Logic & Error Recovery
+**Impact:** ⭐⭐⭐ | **Complexity:** Low | **Effort:** 1-2 days
+
+**Features:**
+- ☐ Exponential backoff for failed searches
+- ☐ Partial result return (some sources succeed, others fail gracefully)
+- ☐ Better error reporting to users
+- ☐ Automatic retry on next scheduled run
+
+**Implementation:**
+- Enhance retry logic in `backend/agent.py`
+- Better error handling in scouts
+- User notification for partial failures
+- Toast notification system for errors
+
+---
+
+### 13.3 — Rate Limiting & Throttling
+**Impact:** ⭐⭐⭐ | **Complexity:** Low | **Effort:** 1 day
+
+**Features:**
+- ☐ Rate limit agent runs (e.g., max 1 per 30 min per user)
+- ☐ Throttle job board requests to avoid blocks
+- ☐ Queue mechanism for heavy load
+- ☐ Rate limit display in UI ("Run again in 25min")
+
+**Implementation:**
+- Rate limit middleware: `backend/rate_limit.py`
+- Queue system (simple DB-backed or Celery)
+- Integrate into `/api/pull` endpoint
+- Show remaining time in UI
+
+---
+
+## Phase 7: User Experience & Accessibility (2 weeks)
+
+### 14.1 — Advanced Search Operators & Query Language
+**Impact:** ⭐⭐ | **Complexity:** Medium | **Effort:** 1-2 days
+
+**Features:**
+- ☐ Support `"exact phrase"` searches
+- ☐ Boolean operators: `AND`, `OR`, `NOT`
+- ☐ Wildcard matching: `Senior*`, `Python?`
+- ☐ Field-specific search: `title:Engineer location:NYC`
+- ☐ Search history + autocomplete
+
+**Implementation:**
+- Query parser: `backend/query_parser.py`
+- Enhance agent prompts to handle complex queries
+- Search input with suggestions
+- Search history sidebar
+
+---
+
+### 14.2 — Keyboard Shortcuts & Command Palette
+**Impact:** ⭐⭐⭐ | **Complexity:** Low | **Effort:** 1-2 days
+
+**Features:**
+- ☐ Command palette (`Cmd+K` or `Ctrl+K`)
+- ☐ Quick shortcuts: `? ` (help), `n` (new search), `b` (bookmarks), `a` (applications)
+- ☐ Keyboard navigation in all lists
+- ☐ Focus trapping in modals
+
+**Implementation:**
+- Command palette: `frontend/src/components/CommandPalette.jsx`
+- Keyboard handlers in `frontend/src/App.jsx`
+- Shortcut help modal
+- Use `kbar` or `cmdk` library (optional)
+
+---
+
+### 14.3 — Settings & Preferences Page
+**Impact:** ⭐⭐⭐ | **Complexity:** Medium | **Effort:** 1-2 days
+
+**Features:**
+- ☐ Centralized settings page with tabs
+- ☐ Email preferences (digest frequency, unsubscribe)
+- ☐ Integration settings (Slack, Discord, webhooks)
+- ☐ API key management
+- ☐ Privacy settings (data retention, export)
+- ☐ Account deletion option
+
+**Implementation:**
+- New page: `frontend/src/pages/Settings.jsx`
+- Tabs for: Email, Integrations, API, Privacy, Account
+- Endpoint: `/api/settings` (GET/PATCH)
+
+---
+
+## Implementation Priority Matrix
+
+| Feature | Phase | Impact | Effort | Timeline | Status |
+|---------|-------|--------|--------|----------|--------|
+| Saved Searches | 1 | ⭐⭐⭐⭐ | 2-3d | Week 1-2 | ☐ |
+| Job Bookmarking | 1 | ⭐⭐⭐⭐ | 1d | Week 1 | ☐ |
+| Dark Mode | 1 | ⭐⭐⭐ | 0.5d | Week 1 | ☐ |
+| Export (CSV/PDF) | 1 | ⭐⭐⭐ | 1d | Week 1 | ☐ |
+| Application Status | 1 | ⭐⭐⭐⭐⭐ | 2d | Week 2 | ☐ |
+| Skills Gap Analysis | 2 | ⭐⭐⭐⭐ | 3-4d | Week 3-4 | ☐ |
+| Matching Score | 2 | ⭐⭐⭐⭐⭐ | 3-5d | Week 4-5 | ☐ |
+| Salary Extraction | 2 | ⭐⭐⭐⭐ | 2-3d | Week 3 | ☐ |
+| Company Insights | 2 | ⭐⭐⭐ | 2-3d | Week 3 | ☐ |
+| Cover Letter Gen | 3 | ⭐⭐⭐⭐ | 3-4d | Week 6-7 | ☐ |
+| Interview Scheduler | 3 | ⭐⭐⭐⭐ | 2-3d | Week 6 | ☐ |
+| Multiple Resumes | 3 | ⭐⭐⭐ | 2d | Week 7 | ☐ |
+| Job Comparison | 3 | ⭐⭐⭐ | 2-3d | Week 7 | ☐ |
+| Analytics Dashboard | 4 | ⭐⭐⭐ | 2-3d | Week 8 | ☐ |
+| Email Digest | 5 | ⭐⭐⭐⭐ | 3-4d | Week 9-10 | ☐ |
+| Webhooks/API | 5 | ⭐⭐⭐ | 2-3d | Week 10 | ☐ |
+| Slack Integration | 5 | ⭐⭐⭐ | 2-3d | Week 11 | ☐ |
+| Caching & Perf | 6 | ⭐⭐⭐ | 2-3d | Week 12 | ☐ |
+| Command Palette | 7 | ⭐⭐ | 1-2d | Week 13 | ☐ |
+
+---
+
+## Architecture Recommendations
+
+### Backend
+- **Background Jobs:** APScheduler for saved search runs, digests, reminders
+- **Task Queue:** Optional Celery for heavy operations at scale
+- **Caching:** Redis for job results and frequently-accessed data
+- **Notifications:** Email (SendGrid/Mailgun) + in-app toast system
+- **API Versioning:** Separate `/api/v1/` for public API
+
+### Frontend
+- **State Management:** Consider Redux/Zustand as complexity grows
+- **Component Library:** Headless UI components for accessibility
+- **Type Safety:** Migrate to TypeScript for better DX
+- **Testing:** E2E tests for critical flows (Cypress/Playwright)
+
+### Database
+- **Indexes:** Create on `(user_id, created_at)`, `url`, `source`, `status`
+- **Partitioning:** Consider partitioning `jobs` table by date if > 10M rows
+- **Backups:** Automated daily backups on Neon
+
+---
+
+## Security & Privacy Considerations
+
+- API keys stored **encrypted** in DB with `cryptography` library
+- Webhook payloads **not stored**; only delivery logs
+- Email preferences with secure **unsubscribe tokens**
+- Rate limiting to prevent brute force / scraping abuse
+- CORS configuration for webhook delivery
+- **No PII in analytics snapshots**
+- GDPR compliance: data export + account deletion
+
+---
+
+## Success Metrics
+
+1. **User Engagement:** DAU, avg session time, feature adoption %
+2. **Application Conversion:** % of users applying, offers received
+3. **Retention:** Monthly return rate, churn rate
+4. **Performance:** Page load < 2s, agent response < 60s
+5. **Data Quality:** Job accuracy, freshness compliance
+
+---
+
+## Notes
+
+- All enhancements maintain the Notion-inspired light design system
+- No breaking changes to existing APIs or UI structure
+- Features designed for graceful degradation (work offline when possible)
+- Prioritize mobile-first for each feature
+- Keep documentation in sync with implementation in app_spec.md and CLAUDE.md
