@@ -22,6 +22,7 @@ import {
   Clock,
   BarChart3,
   Settings as SettingsIcon,
+  Check,
 } from 'lucide-react';
 import UserMenu from './components/UserMenu.jsx';
 import { useToast } from './components/Toast.jsx';
@@ -762,76 +763,75 @@ function Dashboard() {
             />
 
             {/* Job Type Filters */}
-            <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
-              <label className="control-label" style={{ display: 'block', marginBottom: '0.5rem' }}>Job Type</label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                {['fulltime', 'remote', 'contract'].map((type) => (
-                  <label key={type} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.95rem' }}>
-                    <input
-                      id={`filter-jobtype-${type}`}
-                      type="checkbox"
-                      checked={jobTypes.has(type)}
-                      onChange={(e) => {
-                        const newTypes = new Set(jobTypes);
-                        if (e.target.checked) {
-                          newTypes.add(type);
-                        } else {
-                          newTypes.delete(type);
-                        }
-                        setJobTypes(newTypes);
-                      }}
-                      disabled={status.status === 'running'}
-                      style={{ cursor: 'pointer' }}
-                    />
-                    <span style={{ textTransform: 'capitalize' }}>
-                      {type === 'fulltime' ? 'Full-Time' : type === 'remote' ? 'Remote' : 'Contract'}
-                    </span>
-                  </label>
-                ))}
+            <div className="search-option-group">
+              <span className="control-label">Job Type</span>
+              <div className="jobtype-toggles">
+                {[
+                  { key: 'fulltime', label: 'Full-Time' },
+                  { key: 'remote', label: 'Remote' },
+                  { key: 'contract', label: 'Contract' },
+                ].map(({ key, label }) => {
+                  const active = jobTypes.has(key);
+                  return (
+                    <label
+                      key={key}
+                      className={`jobtype-toggle ${active ? 'active' : ''}`}
+                    >
+                      <input
+                        id={`filter-jobtype-${key}`}
+                        type="checkbox"
+                        checked={active}
+                        onChange={(e) => {
+                          const newTypes = new Set(jobTypes);
+                          if (e.target.checked) newTypes.add(key);
+                          else newTypes.delete(key);
+                          setJobTypes(newTypes);
+                        }}
+                        disabled={status.status === 'running'}
+                      />
+                      <span className="jobtype-check">
+                        {active && <Check size={11} strokeWidth={3} />}
+                      </span>
+                      {label}
+                    </label>
+                  );
+                })}
               </div>
             </div>
 
             {/* Time Period Slider */}
-            <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
-              <label htmlFor="time-period-slider" className="control-label" style={{ display: 'block', marginBottom: '0.5rem' }}>
-                Posted Within: <span style={{ fontWeight: 'bold', color: 'var(--primary)' }}>{timePeriodDays} days</span>
-              </label>
+            <div className="search-option-group">
+              <div className="time-period-header">
+                <label htmlFor="time-period-slider" className="control-label">Posted Within</label>
+                <span className="time-period-value">
+                  {timePeriodDays} {timePeriodDays === 1 ? 'day' : 'days'}
+                </span>
+              </div>
               <input
                 id="time-period-slider"
+                className="range-slider"
                 type="range"
                 min="7"
                 max="90"
                 value={timePeriodDays}
                 onChange={(e) => setTimePeriodDays(parseInt(e.target.value, 10))}
                 disabled={status.status === 'running'}
-                style={{
-                  width: '100%',
-                  height: '6px',
-                  borderRadius: '3px',
-                  background: 'var(--border)',
-                  outline: 'none',
-                  cursor: status.status === 'running' ? 'not-allowed' : 'pointer',
-                }}
               />
-              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                {[7, 14, 30, 90].map((days) => (
+              <div className="time-presets">
+                {[
+                  { days: 7, label: '1 Week' },
+                  { days: 14, label: '2 Weeks' },
+                  { days: 30, label: '1 Month' },
+                  { days: 90, label: '3 Months' },
+                ].map(({ days, label }) => (
                   <button
                     key={days}
                     type="button"
+                    className={`time-preset ${timePeriodDays === days ? 'active' : ''}`}
                     onClick={() => setTimePeriodDays(days)}
                     disabled={status.status === 'running'}
-                    style={{
-                      padding: '0.4rem 0.8rem',
-                      fontSize: '0.85rem',
-                      border: `1px solid ${timePeriodDays === days ? 'var(--primary)' : 'var(--border)'}`,
-                      backgroundColor: timePeriodDays === days ? 'var(--primary-glow)' : 'transparent',
-                      color: timePeriodDays === days ? 'var(--primary)' : 'var(--text-muted)',
-                      borderRadius: '4px',
-                      cursor: status.status === 'running' ? 'not-allowed' : 'pointer',
-                      transition: 'all 0.2s',
-                    }}
                   >
-                    {days === 7 ? '1 Week' : days === 14 ? '2 Weeks' : days === 30 ? '1 Month' : '3 Months'}
+                    {label}
                   </button>
                 ))}
               </div>
