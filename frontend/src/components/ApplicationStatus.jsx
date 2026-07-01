@@ -91,9 +91,10 @@ export default function ApplicationStatus({ jobId, applicationId, currentStatus,
       ref={dropdownRef}
       className="application-status-dropdown"
       style={{ position: 'relative', display: 'inline-block' }}
+      onClick={(e) => e.stopPropagation()}
     >
       <button
-        onClick={() => setOpen(!open)}
+        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
         disabled={loading}
         style={{
           display: 'flex',
@@ -136,7 +137,7 @@ export default function ApplicationStatus({ jobId, applicationId, currentStatus,
           {APPLICATION_STATUSES.map((status) => (
             <button
               key={status.value}
-              onClick={() => handleStatusUpdate(status.value)}
+              onClick={(e) => { e.stopPropagation(); handleStatusUpdate(status.value); }}
               disabled={loading}
               style={{
                 display: 'block',

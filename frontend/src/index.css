@@ -521,27 +521,30 @@ body {
   gap: 0.6rem;
 }
 
-/* Job type selectors — pill toggles that highlight when active. */
+/* Job type selectors — pill toggles that highlight when active.
+   A 3-column grid keeps all options aligned on one row and equal width. */
 .jobtype-toggles {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 0.4rem;
 }
 
 .jobtype-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
+  justify-content: center;
+  gap: 0.35rem;
   background-color: var(--bg-base);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   font-weight: 500;
-  padding: 0.4rem 0.75rem;
+  padding: 0.4rem 0.3rem;
   cursor: pointer;
   transition: all var(--transition-fast);
   user-select: none;
+  white-space: nowrap;
 }
 
 .jobtype-toggle:hover {
