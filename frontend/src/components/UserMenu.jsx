@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { User, LogOut, ChevronDown, Settings } from 'lucide-react';
+import { User, LogOut, ChevronDown, Settings, Moon, Sun, SlidersHorizontal } from 'lucide-react';
 import { useAuth } from '../auth.jsx';
+import { useDarkMode } from '../hooks/useDarkMode';
 
 /**
  * Rightmost account control: a single user tab that opens a dropdown
@@ -9,6 +10,7 @@ import { useAuth } from '../auth.jsx';
  */
 export default function UserMenu() {
   const { user, logout } = useAuth();
+  const [isDark, setIsDark] = useDarkMode();
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -74,9 +76,30 @@ export default function UserMenu() {
             onClick={() => setOpen(false)}
             id="user-menu-profile"
           >
-            <Settings size={16} />
+            <User size={16} />
             Account & Profile
           </Link>
+          <Link
+            to="/settings"
+            className="user-menu-item"
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            id="user-menu-settings"
+          >
+            <SlidersHorizontal size={16} />
+            Settings
+          </Link>
+          <button
+            type="button"
+            className="user-menu-item"
+            role="menuitem"
+            onClick={() => setIsDark(!isDark)}
+            id="user-menu-theme"
+          >
+            {isDark ? <Sun size={16} /> : <Moon size={16} />}
+            {isDark ? 'Light mode' : 'Dark mode'}
+          </button>
+          <div className="user-menu-divider" />
           <button
             type="button"
             className="user-menu-item danger"

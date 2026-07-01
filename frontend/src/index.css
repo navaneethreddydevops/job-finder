@@ -846,6 +846,16 @@ body {
   letter-spacing: -0.01em;
 }
 
+/* Right-side toolbar in the jobs panel header: search + contextual actions. */
+.panel-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  max-width: 480px;
+  justify-content: flex-end;
+}
+
 /* Jobs Grid */
 .jobs-grid {
   display: grid;
@@ -971,6 +981,12 @@ body {
   text-overflow: ellipsis;
   min-height: 3.6rem;
   line-height: 1.55;
+}
+
+/* Fallback text shown when a posting has no captured description. */
+.job-desc-empty {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 .job-requirements {

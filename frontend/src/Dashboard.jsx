@@ -21,13 +21,11 @@ import {
   Copy,
   Clock,
   BarChart3,
-  Settings as SettingsIcon,
   Check,
 } from 'lucide-react';
 import UserMenu from './components/UserMenu.jsx';
 import { useToast } from './components/Toast.jsx';
 import ApplicationStatus from './components/ApplicationStatus.jsx';
-import ThemeToggle from './components/ThemeToggle.jsx';
 import ExportButton from './components/ExportButton.jsx';
 import { apiFetch, apiUrl } from './auth';
 import { useDarkMode } from './hooks/useDarkMode';
@@ -636,7 +634,7 @@ function Dashboard() {
             </div>
           </div>
 
-          {/* nav link — styled differently from action buttons */}
+          {/* Primary navigation */}
           <Link to="/resume/optimizer" className="btn nav-link" title="Resume Optimizer">
             <FileText size={16} />
             <span className="header-btn-label">Resume Optimizer</span>
@@ -647,15 +645,7 @@ function Dashboard() {
             <span className="header-btn-label">Analytics</span>
           </Link>
 
-          <Link to="/settings" className="btn nav-link" title="Settings">
-            <SettingsIcon size={16} />
-            <span className="header-btn-label">Settings</span>
-          </Link>
-
-          {/* Action buttons */}
-          <ExportButton format="csv" />
-          <ThemeToggle />
-
+          {/* Account menu (holds Settings + theme toggle + logout) */}
           <UserMenu />
         </div>
       </header>
@@ -1085,27 +1075,30 @@ function Dashboard() {
               <span className="panel-title-count"> ({filteredJobs.length} visible)</span>
             </h2>
 
-            <form
-              id="filter-form"
-              onSubmit={handleFilterFormSubmit}
-              style={{ position: 'relative', width: '260px' }}
-              toolname="search_jobs_form"
-              tooldescription="Search and filter the currently loaded jobs in the local dashboard UI"
-              toolautosubmit="true"
-            >
-              <input
-                id="local-search-input"
-                name="searchTerm"
-                type="text"
-                className="input-text"
-                style={{ paddingLeft: '2.25rem', paddingRight: '2.5rem' }}
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search jobs… (/)"
-                toolparamdescription="Text query to search within titles, companies, or requirements"
-              />
-              <Search size={16} className="text-muted" style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
-            </form>
+            <div className="panel-toolbar">
+              <form
+                id="filter-form"
+                onSubmit={handleFilterFormSubmit}
+                style={{ position: 'relative', flex: 1, minWidth: '200px' }}
+                toolname="search_jobs_form"
+                tooldescription="Search and filter the currently loaded jobs in the local dashboard UI"
+                toolautosubmit="true"
+              >
+                <input
+                  id="local-search-input"
+                  name="searchTerm"
+                  type="text"
+                  className="input-text"
+                  style={{ paddingLeft: '2.25rem', paddingRight: '2.5rem' }}
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Search jobs… (/)"
+                  toolparamdescription="Text query to search within titles, companies, or requirements"
+                />
+                <Search size={16} className="text-muted" style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+              </form>
+              <ExportButton format="csv" />
+            </div>
           </div>
 
           {/* Active filter tags */}
@@ -1208,7 +1201,7 @@ function Dashboard() {
 
                       <div className="job-meta-row">
                         <span className="job-meta-item"><MapPin size={12} />{job.location}</span>
-                        <span className="job-meta-item"><Calendar size={12} />{job.date_posted}</span>
+                        <span className="job-meta-item"><Calendar size={12} />{job.date_posted || 'Recently posted'}</span>
                       </div>
 
                       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -1220,16 +1213,24 @@ function Dashboard() {
                         )}
                       </div>
 
-                      <p className="job-desc-preview">{job.description}</p>
+                      {job.description ? (
+                        <p className="job-desc-preview">{job.description}</p>
+                      ) : (
+                        <p className="job-desc-preview job-desc-empty">
+                          No description captured — open the original posting for details.
+                        </p>
+                      )}
 
-                      <div className="job-requirements">
-                        {job.key_requirements.slice(0, 4).map((req, rIdx) => (
-                          <span key={rIdx} className="requirement-tag">{req}</span>
-                        ))}
-                        {job.key_requirements.length > 4 && (
-                          <span className="requirement-tag">+{job.key_requirements.length - 4} more</span>
-                        )}
-                      </div>
+                      {job.key_requirements.length > 0 && (
+                        <div className="job-requirements">
+                          {job.key_requirements.slice(0, 4).map((req, rIdx) => (
+                            <span key={rIdx} className="requirement-tag">{req}</span>
+                          ))}
+                          {job.key_requirements.length > 4 && (
+                            <span className="requirement-tag">+{job.key_requirements.length - 4} more</span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1310,7 +1311,7 @@ function Dashboard() {
               <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
                 <span className="badge badge-source">{selectedJob.source}</span>
                 <span className="badge badge-neutral" style={{ textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
-                  <Calendar size={11} />Found: {selectedJob.date_posted}
+                  <Calendar size={11} />Found: {selectedJob.date_posted || 'Recently'}
                 </span>
                 {selectedJob.applied && (
                   <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(42,126,79,0.2)', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
@@ -1363,17 +1364,22 @@ function Dashboard() {
 
               <div className="modal-section" id="modal-section-description">
                 <span className="modal-section-title">Job Description</span>
-                <p className="modal-desc-text">{selectedJob.description}</p>
+                <p className={`modal-desc-text ${selectedJob.description ? '' : 'job-desc-empty'}`}>
+                  {selectedJob.description
+                    || 'No description was captured for this posting. Use “View Original Posting” above to read the full details on the source site.'}
+                </p>
               </div>
 
-              <div className="modal-section" id="modal-section-requirements">
-                <span className="modal-section-title">Required Technical Stack</span>
-                <div className="job-requirements" style={{ gap: '0.5rem', marginTop: '0.25rem' }}>
-                  {selectedJob.key_requirements.map((req, idx) => (
-                    <span key={idx} className="requirement-tag" style={{ padding: '0.3rem 0.65rem', fontSize: '0.8rem' }}>{req}</span>
-                  ))}
+              {selectedJob.key_requirements.length > 0 && (
+                <div className="modal-section" id="modal-section-requirements">
+                  <span className="modal-section-title">Required Technical Stack</span>
+                  <div className="job-requirements" style={{ gap: '0.5rem', marginTop: '0.25rem' }}>
+                    {selectedJob.key_requirements.map((req, idx) => (
+                      <span key={idx} className="requirement-tag" style={{ padding: '0.3rem 0.65rem', fontSize: '0.8rem' }}>{req}</span>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           </>
         )}
