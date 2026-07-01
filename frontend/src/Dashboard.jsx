@@ -41,6 +41,7 @@ function timeAgo(isoStr) {
   if (diff < 60) return `${Math.floor(diff)}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
   return null;
 }
 
@@ -94,9 +95,12 @@ function Dashboard() {
     rejected_count: 0,
   });
 
+  // Search customization state
+  const [jobTypes, setJobTypes] = useState(new Set(['fulltime', 'remote']));
+  const [timePeriodDays, setTimePeriodDays] = useState(7);
+
   // filters
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedC2C, setSelectedC2C] = useState('All');
   const [selectedSource, setSelectedSource] = useState('All');
   const [selectedLocation, setSelectedLocation] = useState('All');
   const [selectedApplied, setSelectedApplied] = useState('All');
@@ -124,17 +128,19 @@ function Dashboard() {
   stateRef.current = {
     jobs, filteredJobs: [],
     query, status, logs, searchTerm,
-    selectedC2C, selectedLocation, selectedSource, selectedApplied, selectedJob,
+    selectedLocation, selectedSource, selectedApplied, selectedJob,
   };
 
-  // ── 24h freshness filter ────────────────────────────────────────────────────
-  const isWithin24h = (job) => {
-    if (job.posted_within_24h) return true;
+  // ── 7-day freshness filter ──────────────────────────────────────────────────
+  const isWithin7d = (job) => {
+    if (job.posted_within_7d) return true;
     const d = (job.date_posted || '').toLowerCase();
     if (!d) return false;
-    if (/(just|now|moment|today|hour|minute|second)/.test(d)) return true;
+    if (/(just|now|moment|today|yesterday|hour|minute|second)/.test(d)) return true;
     const dayMatch = d.match(/(\d+)\s*day/);
-    if (dayMatch && parseInt(dayMatch[1], 10) <= 1) return true;
+    if (dayMatch && parseInt(dayMatch[1], 10) <= 7) return true;
+    const weekMatch = d.match(/(\d+)\s*week/);
+    if (weekMatch && parseInt(weekMatch[1], 10) <= 1) return true;
     return false;
   };
 
@@ -145,7 +151,7 @@ function Dashboard() {
       const resp = await apiFetch('/api/jobs');
       if (resp.ok) {
         const data = await resp.json();
-        const fresh = (data.jobs || []).filter(isWithin24h);
+        const fresh = (data.jobs || []).filter(isWithin7d);
         setJobs(fresh);
         if (fresh.length > 0) setFilterOpen(true);
         if (showToast) addToast('Database synced', 'success');
@@ -267,7 +273,11 @@ function Dashboard() {
         const resp = await apiFetch('/api/pull', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: queryValue }),
+          body: JSON.stringify({
+            query: queryValue,
+            job_types: Array.from(jobTypes),
+            time_period_days: timePeriodDays,
+          }),
         });
         if (resp.ok) {
           setStatus({ status: 'running', query: queryValue });
@@ -306,7 +316,33 @@ function Dashboard() {
     fetchJobs();
     fetchAppStats();
     fetchBookmarkCount();
-    fetchStatus();
+
+    // Check if an agent is already running (e.g. from a page refresh)
+    const checkAgentStatus = async () => {
+      try {
+        const resp = await fetch(apiUrl('/api/status'));
+        if (resp.ok) {
+          const data = await resp.json();
+          setStatus(data);
+          if (data.status === 'running' && data.query) {
+            // Agent is still running (e.g. the user refreshed mid-run). Reconnect to the
+            // stream; the backend replays this run's buffered log lines, so the console
+            // repopulates via the normal onmessage handler. `logs` stays at its []
+            // default and fills with strings — do NOT seed it with a placeholder object,
+            // which would break formatLog()/copyLog() (they expect strings).
+            setQuery(data.query);
+            setConsoleOpen(true);
+            setAgentStartTime(performance.now());
+            startStreaming();
+          }
+        }
+      } catch (err) {
+        console.error('Failed to check agent status on mount:', err);
+        fetchStatus();
+      }
+    };
+    checkAgentStatus();
+
     return () => { if (eventSourceRef.current) eventSourceRef.current.close(); };
   }, []);
 
@@ -407,19 +443,18 @@ function Dashboard() {
         job.company.toLowerCase().includes(sl) ||
         job.description.toLowerCase().includes(sl) ||
         job.key_requirements.some(r => r.toLowerCase().includes(sl));
-      const matchesC2C = selectedC2C === 'All' || job.c2c_viability === selectedC2C;
       const matchesSource = selectedSource === 'All' || job.source === selectedSource;
       const isRemote = job.location.toLowerCase().includes('remote');
       const matchesLocation = selectedLocation === 'All' ||
         (selectedLocation === 'Remote' ? isRemote : !isRemote);
       const matchesApplied = selectedApplied === 'All' ||
         (selectedApplied === 'Applied' ? job.applied : !job.applied);
-      return matchesSearch && matchesC2C && matchesSource && matchesLocation && matchesApplied;
+      return matchesSearch && matchesSource && matchesLocation && matchesApplied;
     });
-  }, [jobs, searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied, showBookmarksOnly]);
+  }, [jobs, searchTerm, selectedSource, selectedLocation, selectedApplied, showBookmarksOnly]);
 
   useEffect(() => { setCurrentPage(1); },
-    [searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied]);
+    [searchTerm, selectedSource, selectedLocation, selectedApplied]);
 
   stateRef.current.filteredJobs = filteredJobs;
 
@@ -428,7 +463,6 @@ function Dashboard() {
 
   const stats = useMemo(() => ({
     total: jobs.length,
-    confirmedC2C: jobs.filter(j => j.c2c_viability === 'Confirmed C2C').length,
     remote: jobs.filter(j => j.location.toLowerCase().includes('remote')).length,
     applied: jobs.filter(j => j.applied).length,
     applications: appStats.total_applications,
@@ -441,11 +475,11 @@ function Dashboard() {
     return dates.length ? timeAgo(dates[dates.length - 1]) : null;
   }, [jobs]);
 
-  const activeFilterCount = [selectedC2C, selectedLocation, selectedSource, selectedApplied]
+  const activeFilterCount = [selectedLocation, selectedSource, selectedApplied]
     .filter(v => v !== 'All').length;
 
   const clearAllFilters = () => {
-    setSelectedC2C('All'); setSelectedLocation('All');
+    setSelectedLocation('All');
     setSelectedSource('All'); setSelectedApplied('All');
     setSearchTerm('');
   };
@@ -466,8 +500,8 @@ function Dashboard() {
             return {
               total_database_count: cur.jobs.length,
               filtered_display_count: cur.filteredJobs.length,
-              active_filters: { searchTerm: cur.searchTerm, c2cViability: cur.selectedC2C, location: cur.selectedLocation, source: cur.selectedSource, applied: cur.selectedApplied },
-              jobs: cur.filteredJobs.map((j, idx) => ({ index: idx, id: j.id, title: j.title, company: j.company, location: j.location, c2c_viability: j.c2c_viability, source: j.source, applied: j.applied, key_requirements: j.key_requirements })),
+              active_filters: { searchTerm: cur.searchTerm, location: cur.selectedLocation, source: cur.selectedSource, applied: cur.selectedApplied },
+              jobs: cur.filteredJobs.map((j, idx) => ({ index: idx, id: j.id, title: j.title, company: j.company, location: j.location, source: j.source, applied: j.applied, key_requirements: j.key_requirements })),
             };
           },
           annotations: { readOnlyHint: true },
@@ -476,10 +510,9 @@ function Dashboard() {
         modelContext.registerTool({
           name: 'filter_jobs',
           description: 'Apply text search and filter selections in the dashboard viewport.',
-          inputSchema: { type: 'object', properties: { searchTerm: { type: 'string' }, c2cViability: { type: 'string', enum: ['All', 'Confirmed C2C', 'Likely C2C', 'Not Specified'] }, location: { type: 'string', enum: ['All', 'Remote', 'Onsite/Hybrid'] }, source: { type: 'string' }, applied: { type: 'string', enum: ['All', 'Applied', 'Not Applied'] } } },
+          inputSchema: { type: 'object', properties: { searchTerm: { type: 'string' }, location: { type: 'string', enum: ['All', 'Remote', 'Onsite/Hybrid'] }, source: { type: 'string' }, applied: { type: 'string', enum: ['All', 'Applied', 'Not Applied'] } } },
           execute(input) {
             if (input.searchTerm !== undefined) setSearchTerm(input.searchTerm);
-            if (input.c2cViability !== undefined) setSelectedC2C(input.c2cViability);
             if (input.location !== undefined) setSelectedLocation(input.location);
             if (input.source !== undefined) setSelectedSource(input.source);
             if (input.applied !== undefined) setSelectedApplied(input.applied);
@@ -628,18 +661,18 @@ function Dashboard() {
 
       {/* ── Stats Cards ────────────────────────────────────────────────────── */}
       <section className="stats-grid" id="stats-summary-panel">
-        <div className="stat-card" id="stat-card-total" title="Total unique job postings fetched within the last 24 hours">
+        <div className="stat-card" id="stat-card-total" title="Total unique remote full-time postings from the last 7 days">
           <div className="stat-icon-wrapper primary"><Layers size={22} /></div>
           <div className="stat-info">
             <span className="stat-label">Total Jobs Found</span>
             <span className="stat-value"><AnimatedNumber value={stats.total} /></span>
           </div>
         </div>
-        <div className="stat-card" id="stat-card-confirmed" title="Jobs explicitly confirmed as Corp-to-Corp eligible">
+        <div className="stat-card" id="stat-card-fulltime" title="Full-time roles from Workday, LinkedIn, and Glassdoor">
           <div className="stat-icon-wrapper success"><CheckCircle2 size={22} /></div>
           <div className="stat-info">
-            <span className="stat-label">Confirmed C2C</span>
-            <span className="stat-value"><AnimatedNumber value={stats.confirmedC2C} /></span>
+            <span className="stat-label">Full-Time Roles</span>
+            <span className="stat-value"><AnimatedNumber value={stats.total} /></span>
           </div>
         </div>
         <div className="stat-card" id="stat-card-remote" title="Jobs listed as fully remote">
@@ -711,7 +744,7 @@ function Dashboard() {
             onSubmit={handlePullJobs}
             className="control-group"
             toolname="trigger_agent_run_form"
-            tooldescription="Trigger a backend web scraper agent run to search for C2C job postings matching a specified search query"
+            tooldescription="Trigger a backend web scraper agent run to search for full-time job postings matching a specified search query"
             toolautosubmit="true"
           >
             <label htmlFor="agent-query-input" className="control-label">Search Target</label>
@@ -722,17 +755,94 @@ function Dashboard() {
               className="input-text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="e.g. C2C Data Engineer"
+              placeholder="e.g. Data Engineer"
               disabled={status.status === 'running'}
-              toolparamdescription="The search query for C2C jobs, for example 'C2C Data Engineer' or 'Corp-to-Corp Data Architect'"
+              toolparamdescription="The search query for full-time jobs, for example 'Data Engineer' or 'Senior Python Developer'"
               required
             />
+
+            {/* Job Type Filters */}
+            <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
+              <label className="control-label" style={{ display: 'block', marginBottom: '0.5rem' }}>Job Type</label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                {['fulltime', 'remote', 'contract'].map((type) => (
+                  <label key={type} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.95rem' }}>
+                    <input
+                      id={`filter-jobtype-${type}`}
+                      type="checkbox"
+                      checked={jobTypes.has(type)}
+                      onChange={(e) => {
+                        const newTypes = new Set(jobTypes);
+                        if (e.target.checked) {
+                          newTypes.add(type);
+                        } else {
+                          newTypes.delete(type);
+                        }
+                        setJobTypes(newTypes);
+                      }}
+                      disabled={status.status === 'running'}
+                      style={{ cursor: 'pointer' }}
+                    />
+                    <span style={{ textTransform: 'capitalize' }}>
+                      {type === 'fulltime' ? 'Full-Time' : type === 'remote' ? 'Remote' : 'Contract'}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Time Period Slider */}
+            <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
+              <label htmlFor="time-period-slider" className="control-label" style={{ display: 'block', marginBottom: '0.5rem' }}>
+                Posted Within: <span style={{ fontWeight: 'bold', color: 'var(--primary)' }}>{timePeriodDays} days</span>
+              </label>
+              <input
+                id="time-period-slider"
+                type="range"
+                min="7"
+                max="90"
+                value={timePeriodDays}
+                onChange={(e) => setTimePeriodDays(parseInt(e.target.value, 10))}
+                disabled={status.status === 'running'}
+                style={{
+                  width: '100%',
+                  height: '6px',
+                  borderRadius: '3px',
+                  background: 'var(--border)',
+                  outline: 'none',
+                  cursor: status.status === 'running' ? 'not-allowed' : 'pointer',
+                }}
+              />
+              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+                {[7, 14, 30, 90].map((days) => (
+                  <button
+                    key={days}
+                    type="button"
+                    onClick={() => setTimePeriodDays(days)}
+                    disabled={status.status === 'running'}
+                    style={{
+                      padding: '0.4rem 0.8rem',
+                      fontSize: '0.85rem',
+                      border: `1px solid ${timePeriodDays === days ? 'var(--primary)' : 'var(--border)'}`,
+                      backgroundColor: timePeriodDays === days ? 'var(--primary-glow)' : 'transparent',
+                      color: timePeriodDays === days ? 'var(--primary)' : 'var(--text-muted)',
+                      borderRadius: '4px',
+                      cursor: status.status === 'running' ? 'not-allowed' : 'pointer',
+                      transition: 'all 0.2s',
+                    }}
+                  >
+                    {days === 7 ? '1 Week' : days === 14 ? '2 Weeks' : days === 30 ? '1 Month' : '3 Months'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <button
               id="trigger-agent-btn"
               type="submit"
               className="btn btn-primary"
               disabled={status.status === 'running' || !query.trim()}
-              style={{ marginTop: '0.5rem' }}
+              style={{ marginTop: '1rem' }}
             >
               <RefreshCw size={16} className={status.status === 'running' ? 'spin' : ''} />
               {status.status === 'running' ? 'Agent Running…' : 'Trigger Agent Run'}
@@ -858,22 +968,6 @@ function Dashboard() {
                       id={`filter-applied-${opt.replace(/\s+/g, '-').toLowerCase()}`}
                       className={`filter-pill ${selectedApplied === opt ? 'active' : ''}`}
                       onClick={() => setSelectedApplied(opt)}
-                    >
-                      {opt}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="control-group">
-                <span className="control-label">C2C Viability</span>
-                <div className="filter-pills">
-                  {['All', 'Confirmed C2C', 'Likely C2C', 'Not Specified'].map((opt) => (
-                    <button
-                      key={opt}
-                      id={`filter-c2c-${opt.replace(/\s+/g, '-').toLowerCase()}`}
-                      className={`filter-pill ${selectedC2C === opt ? 'active' : ''}`}
-                      onClick={() => setSelectedC2C(opt)}
                     >
                       {opt}
                     </button>
@@ -1023,12 +1117,6 @@ function Dashboard() {
                   <button onClick={() => setSelectedApplied('All')} aria-label="Remove applied filter"><X size={10} /></button>
                 </span>
               )}
-              {selectedC2C !== 'All' && (
-                <span className="active-filter-tag">
-                  {selectedC2C}
-                  <button onClick={() => setSelectedC2C('All')} aria-label="Remove C2C filter"><X size={10} /></button>
-                </span>
-              )}
               {selectedLocation !== 'All' && (
                 <span className="active-filter-tag">
                   {selectedLocation}
@@ -1124,9 +1212,6 @@ function Dashboard() {
                       </div>
 
                       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                        <span className={`badge ${job.c2c_viability === 'Confirmed C2C' ? 'badge-c2c-confirmed' : job.c2c_viability === 'Likely C2C' ? 'badge-c2c-likely' : 'badge-c2c-unknown'}`}>
-                          {job.c2c_viability}
-                        </span>
                         <span className="badge badge-source">{job.source}</span>
                         {job.applied && (
                           <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(42,126,79,0.2)', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
@@ -1170,7 +1255,7 @@ function Dashboard() {
               </h3>
               <p className="empty-state-desc">
                 {jobs.length === 0
-                  ? 'Enter a search target and trigger the agent to scour job boards for Corp-to-Corp positions.'
+                  ? 'Enter a search target and trigger the agent to find full-time roles on Workday, LinkedIn, and Glassdoor.'
                   : 'No jobs match your active filters.'}
               </p>
               {jobs.length === 0 ? (
@@ -1223,11 +1308,8 @@ function Dashboard() {
                 </span>
               </div>
               <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                <span className={`badge ${selectedJob.c2c_viability === 'Confirmed C2C' ? 'badge-c2c-confirmed' : selectedJob.c2c_viability === 'Likely C2C' ? 'badge-c2c-likely' : 'badge-c2c-unknown'}`}>
-                  {selectedJob.c2c_viability}
-                </span>
                 <span className="badge badge-source">{selectedJob.source}</span>
-                <span className="badge badge-c2c-unknown" style={{ textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
+                <span className="badge badge-neutral" style={{ textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
                   <Calendar size={11} />Found: {selectedJob.date_posted}
                 </span>
                 {selectedJob.applied && (
@@ -1280,7 +1362,7 @@ function Dashboard() {
               )}
 
               <div className="modal-section" id="modal-section-description">
-                <span className="modal-section-title">Job Description & C2C Analysis</span>
+                <span className="modal-section-title">Job Description</span>
                 <p className="modal-desc-text">{selectedJob.description}</p>
               </div>
 
