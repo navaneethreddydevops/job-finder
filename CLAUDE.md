@@ -48,10 +48,10 @@ cd frontend && npm run dev
 cd frontend && npm run build && cd .. && uv run python backend/main.py
 ```
 
-## Cloud deployment — Vercel + Render + Neon
+## Cloud deployment — Vercel + FastAPI Cloud + Neon
 
-Two services over HTTPS, Postgres on Neon, deployed via **native Git integration** (push to
-`master` auto-deploys; no deploy secrets in the repo). See README "Cloud Deployment" for steps.
+Two services over HTTPS, Postgres on Neon. Frontend uses Git-based auto-deploy; backend deploys
+via FastAPI Cloud CLI. See README "Cloud Deployment" for steps.
 
 - **Frontend → Vercel.** [`frontend/vercel.json`](frontend/vercel.json) (Vite preset + SPA
   rewrites), Root Directory = `frontend`. The frontend reaches the backend **cross-origin** via
@@ -61,12 +61,13 @@ Two services over HTTPS, Postgres on Neon, deployed via **native Git integration
   use the helpers so the app works both behind the Vite proxy (local) and cross-origin (prod).
   Auth-protected endpoints (`/api/jobs`, `/api/pull`, `/api/jobs/clear`, `/api/jobs/{id}/apply`)
   must use `apiFetch`; open ones (`/api/status`, `/api/health`, `/api/stream`) use `apiUrl`.
-- **Backend → Render.** [`render.yaml`](render.yaml) Blueprint + [`backend/Dockerfile.render`](backend/Dockerfile.render),
-  which installs Python deps **plus Node.js + the Claude Code CLI** (the SDK spawns `claude`).
-  Auth stays **OAuth-only**: set `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) as a Render
-  secret — the SDK/CLI honor it and `agent.py` does not drop it. Never an API key. Binds `$PORT`.
-- **Database → Neon.** Set `DATABASE_URL` on Render (see Persistence above). `.claude/` is excluded
-  from the Docker build context, so the resume optimizer uses its python-docx fallback in prod.
+- **Backend → FastAPI Cloud.** [`fastapi-cloud.yml`](fastapi-cloud.yml) defines the deployment
+  config. Deploy with `fastapi deploy` CLI (part of `fastapi[standard]` in dependencies). Auth
+  stays **OAuth-only**: set `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) as a secret in
+  the FastAPI Cloud dashboard under Project Settings → Secrets — the SDK/CLI honor it and
+  `agent.py` does not drop it. Never an API key. FastAPI Cloud auto-detects `backend/main.py`.
+- **Database → Neon.** Set `DATABASE_URL` in the FastAPI Cloud dashboard Secrets section (include
+  `?sslmode=require`). Secrets are never committed to git — set them in the dashboard only.
 
 ## Authentication — OAuth only, never an API key
 
@@ -151,7 +152,7 @@ Job discovery is done via the **Exa** and **Tavily** search APIs, exposed to the
   (`title, url, published_date, snippet`). These are the **primary** discovery tools and the reason
   recall is high (the built-in `WebSearch` alone returned too few results).
 - **Keys**: read from env `EXA_API_KEY` / `TAVILY_API_KEY` (never hardcoded; in `.env` locally,
-  Render secrets in prod). If a key is missing, the tool returns a clear message and the agent
+  FastAPI Cloud Secrets in prod). If a key is missing, the tool returns a clear message and the agent
   falls back to `WebSearch`.
 - `WebSearch` — fallback web search when a search API key is unavailable.
 - `WebFetch` — opens and reads individual listings to verify dates, that the role is remote + full-time, and extract fields.
