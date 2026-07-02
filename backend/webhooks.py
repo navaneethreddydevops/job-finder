@@ -1,10 +1,10 @@
 """Webhooks and JSON feed API."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, HttpUrl
 import datetime
 import secrets
-from backend.db import get_db_connection, AUTO_PK, insert_returning_id
+from backend.db import get_db_connection, AUTO_PK
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["webhooks"])

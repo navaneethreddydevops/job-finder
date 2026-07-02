@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
 import datetime
-from backend.db import get_db_connection, get_job_for_user, AUTO_PK, insert_returning_id, init_db
+from backend.db import get_db_connection, get_job_for_user, AUTO_PK, init_db
 from backend.auth import get_current_user, init_auth_db
 
 router = APIRouter(prefix="/api", tags=["cover-letters"])
@@ -87,7 +87,7 @@ async def generate_cover_letter(data: CoverLetterCreate, user: dict = Depends(ge
         now = datetime.datetime.utcnow().isoformat()
 
         # Placeholder content - in production, this would call Claude
-        content = f"""Dear Hiring Manager,
+        content = """Dear Hiring Manager,
 
 I am writing to express my strong interest in this position. Based on the job description provided, I am confident that my skills and experience make me an excellent fit for this role.
 

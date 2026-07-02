@@ -1,9 +1,9 @@
 """Interview scheduling and management."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import datetime
-from backend.db import get_db_connection, get_job_for_user, AUTO_PK, insert_returning_id, init_db
+from backend.db import get_db_connection, AUTO_PK, init_db
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["interviews"])

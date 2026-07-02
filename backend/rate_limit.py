@@ -60,7 +60,6 @@ def check_rate_limit(
     Check if user has exceeded rate limit.
     Returns: { allowed: bool, remaining: int, reset_at: str }
     """
-    key = get_rate_limit_key(user_id, endpoint)
     now = datetime.utcnow()
 
     conn = get_db_connection()

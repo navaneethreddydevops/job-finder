@@ -1,9 +1,8 @@
 """Analytics and job market insights."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import datetime
-from collections import Counter, defaultdict
 from backend.db import get_db_connection, AUTO_PK
 from backend.auth import get_current_user
 

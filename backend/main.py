@@ -273,7 +273,6 @@ async def export_jobs(
 ):
     """Export jobs as CSV or JSON."""
     try:
-        import json
         import csv
         import io
         from datetime import datetime

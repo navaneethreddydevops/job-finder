@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from db import AUTO_PK, get_db_connection, insert_returning_id, ensure_users_table
+from db import get_db_connection, insert_returning_id, ensure_users_table
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PBKDF2_ROUNDS = 200_000

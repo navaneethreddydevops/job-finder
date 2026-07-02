@@ -1,8 +1,8 @@
 """Job matching score calculation and user preferences."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from backend.db import get_user_skills, get_job_skills, get_db_connection, AUTO_PK
+from backend.db import get_db_connection, AUTO_PK
 from backend.auth import get_current_user
 import datetime
 

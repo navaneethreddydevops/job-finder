@@ -1,10 +1,10 @@
 """Slack and Discord integrations."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import datetime
 import aiohttp
-from backend.db import get_db_connection, AUTO_PK, insert_returning_id
+from backend.db import get_db_connection, AUTO_PK
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["integrations"])

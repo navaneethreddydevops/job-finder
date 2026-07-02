@@ -13,10 +13,6 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
 
-  useEffect(() => {
-    fetchSettings();
-  }, []);
-
   const fetchSettings = async () => {
     try {
       const [emailRes, keysRes, webhooksRes, intRes] = await Promise.all([
@@ -36,6 +32,10 @@ export default function Settings() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    fetchSettings();
+  }, []);
 
   const handleEmailPrefsChange = async (updates) => {
     setSaving(true);

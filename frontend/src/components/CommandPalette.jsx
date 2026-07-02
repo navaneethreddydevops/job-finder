@@ -26,6 +26,34 @@ export default function CommandPalette({ isOpen, onClose, onNavigate }) {
     setSelectedIndex(0);
   }, [input]);
 
+  const showHelp = () => {
+    alert(
+      `Keyboard Shortcuts:
+
+Ctrl+K or Cmd+K - Open command palette
+Ctrl+N - New search
+Ctrl+B - Bookmarks
+Ctrl+L - Applications
+Ctrl+Shift+D - Dashboard
+Ctrl+Shift+A - Analytics
+Ctrl+Shift+S - Settings
+? - Show help
+ESC - Close palette`
+    );
+  };
+
+  const executeCommand = (cmd) => {
+    if (cmd.action.startsWith('/')) {
+      onNavigate(cmd.action);
+    } else if (cmd.action === 'new-search') {
+      // Trigger new search in parent
+      onNavigate('new-search');
+    } else if (cmd.action === 'help') {
+      showHelp();
+    }
+    onClose();
+  };
+
   useEffect(() => {
     if (!isOpen) return;
 
@@ -52,34 +80,6 @@ export default function CommandPalette({ isOpen, onClose, onNavigate }) {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, filteredCommands, selectedIndex]);
-
-  const executeCommand = (cmd) => {
-    if (cmd.action.startsWith('/')) {
-      onNavigate(cmd.action);
-    } else if (cmd.action === 'new-search') {
-      // Trigger new search in parent
-      onNavigate('new-search');
-    } else if (cmd.action === 'help') {
-      showHelp();
-    }
-    onClose();
-  };
-
-  const showHelp = () => {
-    alert(
-      `Keyboard Shortcuts:
-
-Ctrl+K or Cmd+K - Open command palette
-Ctrl+N - New search
-Ctrl+B - Bookmarks
-Ctrl+L - Applications
-Ctrl+Shift+D - Dashboard
-Ctrl+Shift+A - Analytics
-Ctrl+Shift+S - Settings
-? - Show help
-ESC - Close palette`
-    );
-  };
 
   if (!isOpen) return null;
 

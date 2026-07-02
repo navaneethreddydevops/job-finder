@@ -1,7 +1,7 @@
 """Email integration and digest service."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
 import datetime
 import secrets
 from backend.db import get_db_connection, AUTO_PK
@@ -181,8 +181,6 @@ async def send_digest(user: dict = Depends(get_current_user)):
 
         if not prefs_row:
             raise HTTPException(status_code=404, detail="Email preferences not configured")
-
-        digest_sources = prefs_row[1].split(",") if prefs_row[1] else []
 
         # Get recent jobs matching user's saved searches. The freshness cutoff is
         # computed in Python — datetime('now', ...) is SQLite-only; jobs.created_at

@@ -1,8 +1,8 @@
 """Job comparison and analysis."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from backend.db import get_db_connection, get_job_for_user
+from backend.db import get_db_connection
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["comparison"])
