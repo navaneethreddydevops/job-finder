@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from db import AUTO_PK, get_db_connection, insert_returning_id
+from db import get_db_connection, insert_returning_id, ensure_users_table
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PBKDF2_ROUNDS = 200_000
@@ -33,19 +33,8 @@ TEST_PASSWORD = "testtest"
 def init_auth_db():
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS users (
-            id {AUTO_PK},
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            salt TEXT NOT NULL,
-            full_name TEXT DEFAULT '',
-            phone TEXT DEFAULT '',
-            created_at TEXT
-        )
-        """
-    )
+    # users DDL lives in db.ensure_users_table — see its docstring for why.
+    ensure_users_table(cur)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS auth_sessions (

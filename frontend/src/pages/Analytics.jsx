@@ -16,10 +16,6 @@ export default function Analytics() {
   const [skillsDemand, setSkillsDemand] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchAnalytics();
-  }, []);
-
   const fetchAnalytics = async () => {
     try {
       const [personalRes, boardRes, marketRes, salaryRes, skillsRes] = await Promise.all([
@@ -62,6 +58,10 @@ export default function Analytics() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    fetchAnalytics();
+  }, []);
 
   if (loading) {
     return <div className="analytics-container"><p>Loading analytics...</p></div>;

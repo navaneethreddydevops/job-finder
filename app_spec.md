@@ -1,7 +1,7 @@
 # Application Specification
 
 This document describes the design for three feature sets added on top of the
-existing **C2C Job Finder** (FastAPI backend + Vite/React frontend + Claude Agent SDK).
+existing **Job Finder** (FastAPI backend + Vite/React frontend + Claude Agent SDK).
 It is the source of truth for the work and should be kept in sync with the code.
 
 ---
@@ -10,9 +10,13 @@ It is the source of truth for the work and should be kept in sync with the code.
 
 Reference: https://code.claude.com/docs/en/agent-sdk/overview
 
-The job-finder orchestrator (`backend/agent.py`) searches for jobs matching a user-provided query
-across six job boards: **LinkedIn, Dice, Monster, Indeed, Glassdoor, and ZipRecruiter**. The agent is granted
-the **full built-in toolset** (no MCP integration), with behavior intentional and documented.
+The job-finder orchestrator (`backend/agent.py`) researches **remote, full-time** jobs across exactly
+two sources: **LinkedIn (`linkedin.com/jobs`) and Workday-hosted careers portals
+(`*.myworkdayjobs.com`)** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter). It always searches a fixed
+set of Principal-level roles (`DEFAULT_ROLES`: DevOps, Cloud, Kubernetes, SRE) plus any extra typed
+query, keeping only postings from the **last 7 days**, and fans out one `job_scout` subagent per
+role × source. The agent is granted the **full built-in toolset** (no MCP integration), with behavior
+intentional and documented.
 
 **Built-in tools granted to orchestrator** (per the Agent SDK overview):
 
@@ -24,22 +28,25 @@ the **full built-in toolset** (no MCP integration), with behavior intentional an
 | `Bash`        | Run shell commands / scripts |
 | `Glob`        | Find files by glob pattern |
 | `Grep`        | Search file contents |
-| `WebSearch`   | Search the web for current postings |
-| `WebFetch`    | Fetch & parse a web page |
+| `mcp__jobsearch__exa_search`    | **Primary** job discovery via the Exa search API |
+| `mcp__jobsearch__tavily_search` | **Primary** job discovery via the Tavily search API |
+| `WebSearch`   | Fallback web search when a search-API key is missing |
+| `WebFetch`    | Fetch & parse an individual listing |
 | `Task`        | Spawn the `job_scout` subagent (fan-out) |
 | `TodoWrite`   | Track multi-step plans |
 
-**Built-in tools granted to job_scout subagent**: the scout receives the same comprehensive
-toolset as the orchestrator (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`,
-`WebFetch`, `TodoWrite`) to enable flexible searching, data processing, and result formatting
-across all job sources.
+**Tools granted to job_scout subagent**: the scout receives the same search + processing
+toolset as the orchestrator (`exa_search`, `tavily_search`, `Read`, `Write`, `Edit`, `Bash`,
+`Glob`, `Grep`, `WebSearch`, `WebFetch`, `TodoWrite`).
 
-**Web tooling**: the agent uses Claude's built-in `WebSearch` and `WebFetch` for job discovery —
-there is **no MCP integration** (the former `job_finder_tools` and `puppeteer` MCP servers
-were removed).
+**Search tooling**: job discovery uses the **Exa** and **Tavily** search APIs, wrapped as
+in-process SDK MCP tools (`backend/search_tools.py`, `create_sdk_mcp_server` → server `jobsearch`)
+and passed via `mcp_servers={"jobsearch": job_search_server}`. Keys come from env `EXA_API_KEY` /
+`TAVILY_API_KEY`. This is the only MCP integration; the former `job_finder_tools` and `puppeteer`
+servers remain removed, and the built-in `WebSearch`/`WebFetch` are kept as a fallback.
 
 Implementation: module-level `AGENT_ALLOWED_TOOLS` and `SCOUT_ALLOWED_TOOLS` lists passed to
-`ClaudeAgentOptions(allowed_tools=...)` and the `job_scout` AgentDefinition respectively.
+`ClaudeAgentOptions(allowed_tools=..., mcp_servers=...)` and the `job_scout` AgentDefinition respectively.
 
 ---
 
@@ -47,7 +54,7 @@ Implementation: module-level `AGENT_ALLOWED_TOOLS` and `SCOUT_ALLOWED_TOOLS` lis
 
 ### Requirements
 - Username **is** the user's email; password is **at least 8 characters**.
-- Stored in the backend database (SQLite, same `jobs.db`).
+- Stored in the backend database (Neon Postgres via `DATABASE_URL`; SQLite test fallback).
 - Endpoints for **login** and **register**, plus **change password** and **update profile**.
 - Seed a **test user**: `test@test.com` / `testtest`.
 
@@ -228,14 +235,14 @@ Scope guardrail: this task is **CSS + fonts only**. Class names, element structu
 
 ## Task 5 — Incremental batch persistence (stream jobs to the DB as scouts finish)
 
-When **Trigger Agent Run** is clicked the agent searches for jobs posted within the
-**last 24 hours** (unchanged). The new requirement: results must be persisted to the
+When **Trigger Agent Run** is clicked the agent researches remote, full-time jobs posted
+within the **last 7 days**. The new requirement: results must be persisted to the
 database in **small batches as they are found**, rather than waiting for the entire
 agent run to finish before a single bulk save at the end.
 
 ### How it works
-- The orchestrator fans out to one `job_scout` subagent per source via the `Task`
-  tool. Each scout returns a JSON array of jobs for **its** source — that array is a
+- The orchestrator fans out to one `job_scout` subagent per role × source via the `Task`
+  tool. Each scout returns a JSON array of jobs for **its** role/source — that array is a
   natural batch.
 - `run_job_finder_agent()` accepts a `batch_callback(jobs: list[dict])`. While streaming
   the agent response it tracks every `Task` tool-use id, and when the matching
@@ -250,7 +257,7 @@ agent run to finish before a single bulk save at the end.
   updated, not duplicated.
 
 ### Notes
-- Only jobs flagged/derivable as posted within 24h are kept (unchanged enforcement at
+- Only jobs flagged/derivable as posted within 7 days are kept (enforcement at
   agent + DB + frontend layers).
 - Batches are best-effort: a malformed scout payload is skipped without failing the run;
   the end-of-run reconciliation pass still captures the merged list.
@@ -379,15 +386,11 @@ All enhancements are tracked in this spec as implementation acceptance criteria
 - ☐ Job cards have a clear visual hierarchy:
   - Line 1: **Job title** (semibold, `--text-primary`)
   - Line 2: **Company** + location dot + **Location** (muted, truncated to 1 line)
-  - Line 3: Chips row — C2C badge, Remote badge (if applicable), Source chip,
-    Posted date
+  - Line 3: Chips row — Source chip, Remote badge (if applicable), Posted date
   - Right column: Applied toggle + "View" link
 - ☐ Cards have a subtle `box-shadow` elevation on `:hover` (use `--shadow-md`)
   and a `0.1s` transition.
-- ☐ The **C2C badge** uses Notion-style colored tags:
-  - Confirmed C2C → green tint
-  - Likely C2C → blue tint
-  - Not Specified → grey tint
+- ☐ The **Source chip** uses a Notion-style colored tag (blue tint via `.badge-source`).
 - ☐ Pagination shows **"Page X of Y · Z jobs"** in muted text; Prev/Next buttons
   are compact arrows; disabled states are visually distinct (not just pointer-events).
 - ☐ The **search bar** above the job list has a keyboard shortcut hint (`⌘K` or `/`)
@@ -414,6 +417,13 @@ All enhancements are tracked in this spec as implementation acceptance criteria
   shown in the console header alongside elapsed time (`Running — 00:42`).
 - ☐ A **"Copy log"** button in the console header copies the full log text to the
   clipboard using `navigator.clipboard.writeText`.
+- ☑ **Survives a page refresh mid-run.** The backend buffers the current run's log
+  lines in an in-memory `log_history` (bounded by `LOG_HISTORY_MAX`, cleared at the
+  start of each `/api/pull`); `GET /api/stream` replays that buffer to any newly
+  connected client before streaming live. The dashboard's mount effect polls
+  `/api/status`, and when a run is active it reconnects to the stream — the replayed
+  history repopulates the console (as plain strings, so `formatLog`/`copyLog` stay
+  correct), so refreshing never loses the in-flight agent session.
 
 ---
 

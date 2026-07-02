@@ -1,9 +1,9 @@
 """Interview scheduling and management."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import datetime
-from backend.db import get_db_connection, get_job_for_user
+from backend.db import get_db_connection, AUTO_PK, init_db
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["interviews"])
@@ -19,13 +19,16 @@ class InterviewCreate(BaseModel):
 
 def init_interview_db():
     """Initialize interview tables."""
+    # Self-initializes at import time; Postgres requires the FK target
+    # (applications, created by init_db) to exist first. init_db is idempotent.
+    init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS interviews (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             application_id INTEGER NOT NULL,
             scheduled_at TEXT,
             interview_type TEXT,
@@ -39,9 +42,9 @@ def init_interview_db():
     )
 
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             interview_id INTEGER NOT NULL,
             remind_at TEXT,
             type TEXT DEFAULT 'email',

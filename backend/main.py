@@ -46,7 +46,7 @@ init_analytics_db()
 init_webhooks_db()
 init_integrations_db()
 
-app = FastAPI(title="C2C Job Finder Backend")
+app = FastAPI(title="Job Finder Backend")
 
 # All routers
 app.include_router(auth_router)
@@ -77,15 +77,31 @@ app.add_middleware(
 # Backend state variables
 agent_status = {"status": "idle", "query": None, "session_id": None}
 log_queues = []
+# In-memory buffer of the current run's log lines so a client that reconnects
+# (e.g. after a browser refresh) can replay what was already emitted. Bounded to
+# cap memory; the run itself is in-memory, so surviving a browser refresh — not a
+# server restart — is the intended scope.
+log_history: list[str] = []
+LOG_HISTORY_MAX = 1500
 
 
 class PullRequest(BaseModel):
-    query: str
+    # Optional: the agent always searches the default Principal roles; a non-empty
+    # query is added as an extra role on top of those defaults.
+    query: str = ""
+    # Job type filters: which types of jobs to search for
+    job_types: list[str] = ["fulltime", "remote"]
+    # Time period in days: how far back to search (7-90 days)
+    time_period_days: int = 7
 
 
 async def publish_log(msg: str):
-    """Broadcasts a log message to all active stream connections."""
+    """Broadcasts a log message to all active stream connections and buffers it so
+    reconnecting clients can replay the current run's history."""
     print(msg, flush=True)
+    log_history.append(msg)
+    if len(log_history) > LOG_HISTORY_MAX:
+        del log_history[: len(log_history) - LOG_HISTORY_MAX]
     for q in list(log_queues):
         try:
             await q.put(msg)
@@ -93,8 +109,10 @@ async def publish_log(msg: str):
             pass
 
 
-async def run_agent_task(query: str, user_id: int):
+async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, time_period_days: int = 7):
     """Background task to run the agent and save results to the SQLite database."""
+    if job_types is None:
+        job_types = ["fulltime", "remote"]
     global agent_status
     import uuid
 
@@ -127,7 +145,7 @@ async def run_agent_task(query: str, user_id: int):
         is_resume = False
         agent_status["session_id"] = str(uuid.uuid4())
 
-        # Pass the tracked session_id
+        # Pass the tracked session_id and search parameters
         results = await run_job_finder_agent(
             query,
             user_id=user_id,
@@ -135,6 +153,8 @@ async def run_agent_task(query: str, user_id: int):
             session_id=agent_status["session_id"],
             is_resume=is_resume,
             batch_callback=batch_callback,
+            job_types=job_types,
+            time_period_days=time_period_days,
         )
 
         if results is None:
@@ -253,7 +273,6 @@ async def export_jobs(
 ):
     """Export jobs as CSV or JSON."""
     try:
-        import json
         import csv
         import io
         from datetime import datetime
@@ -278,7 +297,6 @@ async def export_jobs(
                     "company",
                     "location",
                     "source",
-                    "c2c_viability",
                     "date_posted",
                     "url",
                     "applied",
@@ -292,7 +310,6 @@ async def export_jobs(
                             "company": job.get("company", ""),
                             "location": job.get("location", ""),
                             "source": job.get("source", ""),
-                            "c2c_viability": job.get("c2c_viability", ""),
                             "date_posted": job.get("date_posted", ""),
                             "url": job.get("url", ""),
                             "applied": "Yes" if job.get("applied") else "No",
@@ -330,8 +347,10 @@ async def pull_jobs(req: PullRequest, background_tasks: BackgroundTasks, user: d
 
     agent_status["status"] = "running"
     agent_status["query"] = req.query
+    # Start each run with a clean log buffer so the console doesn't replay a stale run.
+    log_history.clear()
 
-    background_tasks.add_task(run_agent_task, req.query, user["id"])
+    background_tasks.add_task(run_agent_task, req.query, user["id"], req.job_types, req.time_period_days)
     return {
         "message": "Job pulling started",
         "query": req.query,
@@ -348,10 +367,18 @@ async def stream_logs():
 
     async def event_generator():
         q = asyncio.Queue()
+        # Snapshot history and register the live queue with NO await between them:
+        # both are synchronous, so in single-threaded asyncio no other coroutine can
+        # publish in the gap — the replay contains no lost or duplicated lines.
+        history_snapshot = list(log_history)
         log_queues.append(q)
         try:
             # Yield initial status message
             yield f"data: {json.dumps({'message': '[Connection Established] Connected to agent logs stream.'})}\n\n"
+            # Replay the current run's buffered logs so a reconnecting client (e.g. after
+            # a page refresh) sees everything emitted before it connected.
+            for msg in history_snapshot:
+                yield f"data: {json.dumps({'message': msg})}\n\n"
             while True:
                 msg = await q.get()
                 yield f"data: {json.dumps({'message': msg})}\n\n"

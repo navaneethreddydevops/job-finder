@@ -1,10 +1,10 @@
 """Email integration and digest service."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
 import datetime
 import secrets
-from backend.db import get_db_connection
+from backend.db import get_db_connection, AUTO_PK
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["email"])
@@ -29,10 +29,10 @@ def init_email_db():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS email_preferences (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL UNIQUE,
+            id {AUTO_PK},
+            user_id INTEGER NOT NULL UNIQUE,
             digest_enabled BOOLEAN DEFAULT TRUE,
             digest_frequency TEXT DEFAULT 'daily',
             digest_sources TEXT,
@@ -43,19 +43,19 @@ def init_email_db():
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS email_digests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
+            id {AUTO_PK},
+            user_id INTEGER NOT NULL,
             sent_at TEXT NOT NULL,
             job_count INTEGER DEFAULT 0,
             status TEXT DEFAULT 'sent'
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS email_templates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             name TEXT NOT NULL UNIQUE,
             subject TEXT NOT NULL,
             body TEXT NOT NULL,
@@ -128,10 +128,17 @@ async def update_email_preferences(
         digest_sources = ",".join(prefs.get("digest_sources", []))
         cursor.execute(
             """
-            INSERT OR REPLACE INTO email_preferences
+            INSERT INTO email_preferences
             (user_id, digest_enabled, digest_frequency, digest_sources,
              receive_new_jobs, unsubscribe_token, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                digest_enabled = EXCLUDED.digest_enabled,
+                digest_frequency = EXCLUDED.digest_frequency,
+                digest_sources = EXCLUDED.digest_sources,
+                receive_new_jobs = EXCLUDED.receive_new_jobs,
+                unsubscribe_token = EXCLUDED.unsubscribe_token,
+                updated_at = EXCLUDED.updated_at
             """,
             (
                 user["id"],
@@ -175,18 +182,21 @@ async def send_digest(user: dict = Depends(get_current_user)):
         if not prefs_row:
             raise HTTPException(status_code=404, detail="Email preferences not configured")
 
-        digest_sources = prefs_row[1].split(",") if prefs_row[1] else []
-
-        # Get recent jobs matching user's saved searches
+        # Get recent jobs matching user's saved searches. The freshness cutoff is
+        # computed in Python — datetime('now', ...) is SQLite-only; jobs.created_at
+        # is stored as 'YYYY-MM-DD HH:MM:SS' text so string comparison works.
+        cutoff = (
+            datetime.datetime.utcnow() - datetime.timedelta(days=7)
+        ).strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute(
             """
-            SELECT j.id, j.title, j.company, j.source, j.url, j.posted_at
+            SELECT j.id, j.title, j.company, j.source, j.url, j.date_posted
             FROM jobs j
             LEFT JOIN saved_searches ss ON j.title LIKE '%' || ss.query || '%'
-            WHERE j.user_id = ? AND j.posted_within_24h = 1
-            AND j.created_at > datetime('now', '-24 hours')
+            WHERE j.user_id = ? AND j.posted_within_7d = 1
+            AND j.created_at > ?
             """,
-            (user["id"],),
+            (user["id"], cutoff),
         )
         jobs = cursor.fetchall()
 

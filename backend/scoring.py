@@ -1,8 +1,8 @@
 """Job matching score calculation and user preferences."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from backend.db import get_user_skills, get_job_skills, get_db_connection
+from backend.db import get_db_connection, AUTO_PK
 from backend.auth import get_current_user
 import datetime
 
@@ -15,9 +15,9 @@ def init_scoring_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS job_match_scores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             job_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             match_score INTEGER,
@@ -31,9 +31,9 @@ def init_scoring_db():
         """
     )
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS user_preferences (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             user_id INTEGER UNIQUE,
             preferred_locations TEXT,
             experience_level TEXT,
@@ -141,9 +141,9 @@ def save_match_score(job_id: int, user_id: int, score: int, components: dict):
 
     # Create match_scores table if not exists
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS job_match_scores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             job_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             match_score INTEGER,
@@ -159,9 +159,16 @@ def save_match_score(job_id: int, user_id: int, score: int, components: dict):
 
     cursor.execute(
         """
-        INSERT OR REPLACE INTO job_match_scores
+        INSERT INTO job_match_scores
         (job_id, user_id, match_score, skill_overlap, level_fit, location_fit, salary_fit, calculated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_id, user_id) DO UPDATE SET
+            match_score = EXCLUDED.match_score,
+            skill_overlap = EXCLUDED.skill_overlap,
+            level_fit = EXCLUDED.level_fit,
+            location_fit = EXCLUDED.location_fit,
+            salary_fit = EXCLUDED.salary_fit,
+            calculated_at = EXCLUDED.calculated_at
         """,
         (
             job_id,
@@ -203,9 +210,9 @@ async def save_preferences(data: UserPreferences, user: dict = Depends(get_curre
 
         # Create preferences table if not exists
         cursor.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS user_preferences (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {AUTO_PK},
                 user_id INTEGER UNIQUE,
                 preferred_locations TEXT,
                 experience_level TEXT,
@@ -223,9 +230,17 @@ async def save_preferences(data: UserPreferences, user: dict = Depends(get_curre
         now = datetime.datetime.utcnow().isoformat()
         cursor.execute(
             """
-            INSERT OR REPLACE INTO user_preferences
+            INSERT INTO user_preferences
             (user_id, preferred_locations, experience_level, industries, remote_only, salary_min, salary_max, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                preferred_locations = EXCLUDED.preferred_locations,
+                experience_level = EXCLUDED.experience_level,
+                industries = EXCLUDED.industries,
+                remote_only = EXCLUDED.remote_only,
+                salary_min = EXCLUDED.salary_min,
+                salary_max = EXCLUDED.salary_max,
+                updated_at = EXCLUDED.updated_at
             """,
             (
                 user["id"],

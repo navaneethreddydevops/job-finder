@@ -1,10 +1,9 @@
 """Analytics and job market insights."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import datetime
-from collections import Counter, defaultdict
-from backend.db import get_db_connection
+from backend.db import get_db_connection, AUTO_PK
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["analytics"])
@@ -35,10 +34,10 @@ def init_analytics_db():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS analytics_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
+            id {AUTO_PK},
+            user_id INTEGER NOT NULL,
             snapshot_date TEXT NOT NULL,
             applications_count INTEGER DEFAULT 0,
             interviews_count INTEGER DEFAULT 0,
@@ -49,9 +48,9 @@ def init_analytics_db():
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS market_trends (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             snapshot_date TEXT NOT NULL,
             trending_skills TEXT,
             top_locations TEXT,
@@ -61,10 +60,10 @@ def init_analytics_db():
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS board_metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
+            id {AUTO_PK},
+            user_id INTEGER NOT NULL,
             source TEXT NOT NULL,
             total_jobs INTEGER DEFAULT 0,
             applications_count INTEGER DEFAULT 0,
@@ -170,12 +169,17 @@ def get_market_insights() -> MarketInsights:
 
     # Trending skills (recently posted jobs)
     trending_skills = []
+    # Cutoff computed in Python — datetime('now', ...) is SQLite-only and
+    # created_at is 'YYYY-MM-DD HH:MM:SS' text, so string comparison works.
+    cutoff_7d = (
+        datetime.datetime.utcnow() - datetime.timedelta(days=7)
+    ).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("""
         SELECT js.skill, COUNT(*) as count FROM job_skills js
         JOIN jobs j ON js.job_id = j.id
-        WHERE j.created_at > datetime('now', '-7 days')
+        WHERE j.created_at > ?
         GROUP BY js.skill ORDER BY count DESC LIMIT 10
-    """)
+    """, (cutoff_7d,))
     trending_skills = [row[0] for row in cursor.fetchall()]
 
     conn.close()
@@ -197,40 +201,45 @@ async def get_personal_analytics(user: dict = Depends(get_current_user)):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Get application trends (last 30 days)
+        # Get application trends (last 30 days); cutoff computed in Python
+        # (datetime('now', ...) is SQLite-only) and dates grouped by the
+        # first 10 chars of the ISO timestamp, portable to both backends.
+        cutoff_30d = (
+            datetime.datetime.utcnow() - datetime.timedelta(days=30)
+        ).strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("""
-            SELECT DATE(created_at) as date, COUNT(*) as count
+            SELECT SUBSTR(created_at, 1, 10) as date, COUNT(*) as count
             FROM applications
-            WHERE user_id = ? AND created_at > datetime('now', '-30 days')
-            GROUP BY DATE(created_at)
+            WHERE user_id = ? AND created_at > ?
+            GROUP BY SUBSTR(created_at, 1, 10)
             ORDER BY date
-        """, (user["id"],))
+        """, (user["id"], cutoff_30d))
         application_trends = [
             {"date": row[0], "count": row[1]} for row in cursor.fetchall()
         ]
 
         # Get interview trends
         cursor.execute("""
-            SELECT DATE(created_at) as date, COUNT(*) as count
+            SELECT SUBSTR(created_at, 1, 10) as date, COUNT(*) as count
             FROM applications
             WHERE user_id = ? AND status = 'interviewing'
-            AND created_at > datetime('now', '-30 days')
-            GROUP BY DATE(created_at)
+            AND created_at > ?
+            GROUP BY SUBSTR(created_at, 1, 10)
             ORDER BY date
-        """, (user["id"],))
+        """, (user["id"], cutoff_30d))
         interview_trends = [
             {"date": row[0], "count": row[1]} for row in cursor.fetchall()
         ]
 
         # Get offer trends
         cursor.execute("""
-            SELECT DATE(created_at) as date, COUNT(*) as count
+            SELECT SUBSTR(created_at, 1, 10) as date, COUNT(*) as count
             FROM applications
             WHERE user_id = ? AND status = 'offer'
-            AND created_at > datetime('now', '-30 days')
-            GROUP BY DATE(created_at)
+            AND created_at > ?
+            GROUP BY SUBSTR(created_at, 1, 10)
             ORDER BY date
-        """, (user["id"],))
+        """, (user["id"], cutoff_30d))
         offer_trends = [
             {"date": row[0], "count": row[1]} for row in cursor.fetchall()
         ]

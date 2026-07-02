@@ -61,32 +61,6 @@
   --radius-lg: 12px;
 }
 
-/* Dark mode theme */
-:root[data-theme="dark"] {
-  --bg: #1a1a1a;
-  --bg-surface: #2d2d2d;
-  --bg-elevated: #3d3d3d;
-  --text-primary: #e8e8e8;
-  --text-secondary: #b8b8b8;
-  --text-muted: #888888;
-  --border: rgba(255, 255, 255, 0.12);
-  --primary: #66b3ff;
-  --primary-glow: rgba(102, 179, 255, 0.2);
-  --success: #66cc99;
-  --success-glow: rgba(102, 204, 153, 0.15);
-  --warning: #ffb366;
-  --error: #ff6666;
-  --error-glow: rgba(255, 102, 102, 0.15);
-  --border-focus: rgba(102, 179, 255, 0.4);
-  --text-inverse: #1a1a1a;
-
-  /* Shadows for dark mode */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.3), 0 3px 8px rgba(0, 0, 0, 0.25);
-  --shadow-lg: rgba(0, 0, 0, 0.4) 0 0 0 1px, rgba(0, 0, 0, 0.4) 0 4px 12px, rgba(0, 0, 0, 0.5) 0 12px 28px;
-  --shadow-glow: 0 0 0 3px var(--primary-glow);
-}
-
 * {
   box-sizing: border-box;
   margin: 0;
@@ -535,6 +509,188 @@ body {
   box-shadow: none;
 }
 
+/* ── Search customization: job-type toggles + time-period slider ─────────────── */
+
+/* A labelled block inside the agent-run form (job type / posted-within). */
+.search-option-group {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* Job type selectors — pill toggles that highlight when active.
+   A 3-column grid keeps all options aligned on one row and equal width. */
+.jobtype-toggles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.4rem;
+}
+
+.jobtype-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  background-color: var(--bg-base);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 0.4rem 0.3rem;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  user-select: none;
+  white-space: nowrap;
+}
+
+.jobtype-toggle:hover {
+  background-color: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+.jobtype-toggle.active {
+  background-color: var(--primary-glow);
+  border-color: var(--primary);
+  color: var(--primary-hover);
+}
+
+/* Native checkbox hidden — the pill itself is the control; check icon shows state. */
+.jobtype-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.jobtype-toggle .jobtype-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  border: 1.5px solid var(--border-strong);
+  color: #fff;
+  transition: all var(--transition-fast);
+}
+
+.jobtype-toggle.active .jobtype-check {
+  background-color: var(--primary);
+  border-color: var(--primary);
+}
+
+.jobtype-toggle input:focus-visible + .jobtype-check {
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+/* Time period: header row with live value badge. */
+.time-period-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.time-period-value {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--primary-hover);
+  background-color: var(--primary-glow);
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* Styled range slider. accent-color gives a theme-matched native fill. */
+.range-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  outline: none;
+  cursor: pointer;
+  accent-color: var(--primary);
+  margin: 0.2rem 0;
+}
+
+.range-slider:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.range-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid var(--bg-base);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+}
+
+.range-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+.range-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid var(--bg-base);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+}
+
+/* Preset quick-select buttons under the slider. */
+.time-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+}
+
+.time-preset {
+  flex: 1;
+  min-width: 56px;
+  white-space: nowrap;
+  background-color: var(--bg-base);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.4rem 0.3rem;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.time-preset:hover:not(:disabled) {
+  background-color: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+.time-preset.active {
+  background-color: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.time-preset:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 /* Buttons */
 .btn {
   display: inline-flex;
@@ -690,11 +846,86 @@ body {
   letter-spacing: -0.01em;
 }
 
+/* Right-side toolbar in the jobs panel header: search + contextual actions. */
+.panel-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  max-width: 480px;
+  justify-content: flex-end;
+}
+
 /* Jobs Grid */
 .jobs-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
   gap: 1rem;
+}
+
+/* View toggle (tile / list) */
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.view-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.45rem 0.6rem;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--transition-normal), color var(--transition-normal);
+}
+
+.view-toggle-btn + .view-toggle-btn {
+  border-left: 1px solid var(--border);
+}
+
+.view-toggle-btn:hover {
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+}
+
+.view-toggle-btn.active {
+  color: var(--primary);
+  background: var(--primary-glow);
+}
+
+/* List view — compact single-column rows */
+.jobs-grid.list-view {
+  grid-template-columns: 1fr;
+  gap: 0.55rem;
+}
+
+.jobs-grid.list-view .job-card {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+  padding: 0.8rem 1.15rem;
+}
+
+.jobs-grid.list-view .job-card-header {
+  flex: 1 1 260px;
+  min-width: 0;
+  align-items: center;
+}
+
+.jobs-grid.list-view .job-meta-row {
+  flex: 0 0 auto;
+}
+
+.jobs-grid.list-view .job-desc-preview,
+.jobs-grid.list-view .job-requirements {
+  display: none;
 }
 
 /* Job Card */
@@ -793,20 +1024,7 @@ body {
 }
 
 /* Notion-style pastel tag colors */
-.badge-c2c-confirmed {
-  background-color: rgba(219, 237, 219, 0.7);
-  color: #1c6b3f;
-  border: 1px solid rgba(42, 126, 79, 0.25);
-  box-shadow: none;
-}
-
-.badge-c2c-likely {
-  background-color: rgba(253, 236, 200, 0.75);
-  color: #9a6700;
-  border: 1px solid rgba(203, 145, 47, 0.3);
-}
-
-.badge-c2c-unknown {
+.badge-neutral {
   background-color: var(--bg-subtle);
   color: var(--text-secondary);
   border: 1px solid var(--border);
@@ -828,6 +1046,12 @@ body {
   text-overflow: ellipsis;
   min-height: 3.6rem;
   line-height: 1.55;
+}
+
+/* Fallback text shown when a posting has no captured description. */
+.job-desc-empty {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 .job-requirements {

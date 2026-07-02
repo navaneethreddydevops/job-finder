@@ -52,12 +52,44 @@ if not IS_POSTGRES:
 # These wrappers translate on the way through so call sites stay backend-agnostic.
 # (No SQL in this project contains a literal '?', so the substitution is safe.)
 # ---------------------------------------------------------------------------
+class _PgRow(dict):
+    """Dict row that also supports positional access, like sqlite3.Row.
+
+    psycopg's dict_row only allows row["col"], but several modules index rows
+    positionally (row[0]). Dicts preserve insertion order and psycopg builds
+    them in SELECT-column order, so integer indexing is well-defined.
+    """
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+    def __iter__(self):
+        # sqlite3.Row iterates over VALUES (enabling `a, b = row` unpacking);
+        # plain dicts iterate over keys. Match sqlite3.Row. dict(row) still
+        # works correctly — the dict constructor uses keys()/__getitem__ for
+        # Mapping arguments, not iteration.
+        return iter(self.values())
+
+
+def _pg_row_factory(cursor):
+    columns = [c.name for c in cursor.description] if cursor.description else []
+
+    def make_row(values):
+        return _PgRow(zip(columns, values))
+
+    return make_row
+
+
 class _PgCursor:
     def __init__(self, cur):
         self._cur = cur
 
     def execute(self, sql, params=()):
-        return self._cur.execute(sql.replace("?", "%s"), params)
+        # Escape literal % (e.g. LIKE '%Senior%') before introducing %s
+        # placeholders — psycopg treats bare % in the SQL as placeholder syntax.
+        return self._cur.execute(sql.replace("%", "%%").replace("?", "%s"), params)
 
     def __getattr__(self, name):
         return getattr(self._cur, name)
@@ -77,9 +109,8 @@ class _PgConnection:
 def get_db_connection():
     if IS_POSTGRES:
         import psycopg
-        from psycopg.rows import dict_row
 
-        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        conn = psycopg.connect(DATABASE_URL, row_factory=_pg_row_factory)
         return _PgConnection(conn)
 
     conn = sqlite3.connect(DB_PATH)
@@ -112,9 +143,34 @@ def _column_exists(cursor, table, column):
     return any(row[1] == column for row in cursor.fetchall())
 
 
+def ensure_users_table(cursor):
+    """Create the users table if missing.
+
+    Owned by auth.py conceptually, but defined here because init_db()'s tables
+    declare FOREIGN KEY references to users — Postgres requires the FK target
+    to exist at CREATE TABLE time (SQLite doesn't), so users must be creatable
+    from db.py before any dependent table. auth.init_auth_db() calls this too
+    and remains the place that seeds the test user.
+    """
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS users (
+            id {AUTO_PK},
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            full_name TEXT DEFAULT '',
+            phone TEXT DEFAULT '',
+            created_at TEXT
+        )
+        """
+    )
+
+
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
+    ensure_users_table(cursor)
     cursor.execute(
         f"""
         CREATE TABLE IF NOT EXISTS jobs (
@@ -125,14 +181,13 @@ def init_db():
             location TEXT,
             url TEXT,
             date_posted TEXT,
-            c2c_viability TEXT,
             key_requirements TEXT,
             contact_email TEXT,
             contact_phone TEXT,
             source TEXT,
             description TEXT,
             applied INTEGER DEFAULT 0,
-            posted_within_24h INTEGER DEFAULT 0,
+            posted_within_7d INTEGER DEFAULT 0,
             salary_min REAL,
             salary_max REAL,
             salary_currency TEXT,
@@ -144,21 +199,25 @@ def init_db():
         """
     )
 
+    # Freshness flag: rename the legacy 24h column to 7d in place when present, then
+    # ensure the column exists for very old databases. Works on both Postgres and
+    # SQLite (>= 3.25 supports RENAME COLUMN).
+    if _column_exists(cursor, "jobs", "posted_within_24h") and not _column_exists(
+        cursor, "jobs", "posted_within_7d"
+    ):
+        cursor.execute(
+            "ALTER TABLE jobs RENAME COLUMN posted_within_24h TO posted_within_7d"
+        )
+    if not _column_exists(cursor, "jobs", "posted_within_7d"):
+        cursor.execute("ALTER TABLE jobs ADD COLUMN posted_within_7d INTEGER DEFAULT 0")
+
     if IS_POSTGRES:
         # Fresh Neon databases are created with the full schema above; only guard
         # against an older deployment missing the newest column.
-        if not _column_exists(cursor, "jobs", "posted_within_24h"):
-            cursor.execute(
-                "ALTER TABLE jobs ADD COLUMN posted_within_24h INTEGER DEFAULT 0"
-            )
         if not _column_exists(cursor, "jobs", "created_at"):
             cursor.execute("ALTER TABLE jobs ADD COLUMN created_at TEXT")
     else:
         # Legacy SQLite databases may predate some columns — migrate in place.
-        if not _column_exists(cursor, "jobs", "posted_within_24h"):
-            cursor.execute(
-                "ALTER TABLE jobs ADD COLUMN posted_within_24h INTEGER DEFAULT 0"
-            )
         if not _column_exists(cursor, "jobs", "salary_min"):
             cursor.execute("ALTER TABLE jobs ADD COLUMN salary_min REAL")
             cursor.execute("ALTER TABLE jobs ADD COLUMN salary_max REAL")
@@ -182,14 +241,13 @@ def init_db():
                     location TEXT,
                     url TEXT,
                     date_posted TEXT,
-                    c2c_viability TEXT,
                     key_requirements TEXT,
                     contact_email TEXT,
                     contact_phone TEXT,
                     source TEXT,
                     description TEXT,
                     applied INTEGER DEFAULT 0,
-                    posted_within_24h INTEGER DEFAULT 0,
+                    posted_within_7d INTEGER DEFAULT 0,
                     salary_min REAL,
                     salary_max REAL,
                     salary_currency TEXT,
@@ -351,7 +409,7 @@ def save_job(job_dict, user_id: int):
     row = cursor.fetchone()
 
     key_reqs_json = json.dumps(job_dict.get("key_requirements", []))
-    posted_within_24h = 1 if job_dict.get("posted_within_24h") else 0
+    posted_within_7d = 1 if job_dict.get("posted_within_7d") else 0
 
     inserted = False
     if row:
@@ -361,8 +419,8 @@ def save_job(job_dict, user_id: int):
             """
             UPDATE jobs
             SET title = ?, company = ?, location = ?, date_posted = ?,
-                c2c_viability = ?, key_requirements = ?, contact_email = ?,
-                contact_phone = ?, source = ?, description = ?, posted_within_24h = ?,
+                key_requirements = ?, contact_email = ?,
+                contact_phone = ?, source = ?, description = ?, posted_within_7d = ?,
                 salary_min = ?, salary_max = ?, salary_currency = ?,
                 is_salary_extracted = ?, salary_confidence = ?
             WHERE id = ? AND user_id = ?
@@ -372,13 +430,12 @@ def save_job(job_dict, user_id: int):
                 company,
                 location,
                 job_dict.get("date_posted"),
-                job_dict.get("c2c_viability"),
                 key_reqs_json,
                 job_dict.get("contact_email"),
                 job_dict.get("contact_phone"),
                 job_dict.get("source"),
                 job_dict.get("description"),
-                posted_within_24h,
+                posted_within_7d,
                 job_dict.get("salary_min"),
                 job_dict.get("salary_max"),
                 job_dict.get("salary_currency"),
@@ -395,11 +452,11 @@ def save_job(job_dict, user_id: int):
             """
             INSERT INTO jobs (
                 user_id, title, company, location, url, date_posted,
-                c2c_viability, key_requirements, contact_email,
-                contact_phone, source, description, applied, posted_within_24h,
+                key_requirements, contact_email,
+                contact_phone, source, description, applied, posted_within_7d,
                 salary_min, salary_max, salary_currency, is_salary_extracted, salary_confidence,
                 created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 user_id,
@@ -408,13 +465,12 @@ def save_job(job_dict, user_id: int):
                 location,
                 url,
                 job_dict.get("date_posted"),
-                job_dict.get("c2c_viability"),
                 key_reqs_json,
                 job_dict.get("contact_email"),
                 job_dict.get("contact_phone"),
                 job_dict.get("source"),
                 job_dict.get("description"),
-                posted_within_24h,
+                posted_within_7d,
                 job_dict.get("salary_min"),
                 job_dict.get("salary_max"),
                 job_dict.get("salary_currency", "USD"),
@@ -443,7 +499,7 @@ def get_user_jobs(user_id: int):
             job["key_requirements"] = []
         # Convert integer flags to booleans
         job["applied"] = bool(job["applied"])
-        job["posted_within_24h"] = bool(job.get("posted_within_24h"))
+        job["posted_within_7d"] = bool(job.get("posted_within_7d"))
         jobs.append(job)
     conn.close()
     return jobs
@@ -464,7 +520,7 @@ def get_job_for_user(job_id: int, user_id: int):
     except Exception:
         job["key_requirements"] = []
     job["applied"] = bool(job["applied"])
-    job["posted_within_24h"] = bool(job.get("posted_within_24h"))
+    job["posted_within_7d"] = bool(job.get("posted_within_7d"))
     return job
 
 
@@ -748,7 +804,7 @@ def get_user_bookmarks(user_id: int):
         except Exception:
             job["key_requirements"] = []
         job["applied"] = bool(job["applied"])
-        job["posted_within_24h"] = bool(job.get("posted_within_24h"))
+        job["posted_within_7d"] = bool(job.get("posted_within_7d"))
         job["is_bookmarked"] = True
         bookmarks.append(job)
     conn.close()
@@ -1040,7 +1096,7 @@ def get_jobs_by_salary_range(user_id: int, min_salary: float = None, max_salary:
         except Exception:
             job["key_requirements"] = []
         job["applied"] = bool(job["applied"])
-        job["posted_within_24h"] = bool(job.get("posted_within_24h"))
+        job["posted_within_7d"] = bool(job.get("posted_within_7d"))
         jobs.append(job)
     conn.close()
     return jobs

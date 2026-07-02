@@ -3,8 +3,8 @@
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
 import datetime
-from backend.db import get_db_connection, get_job_for_user
-from backend.auth import get_current_user
+from backend.db import get_db_connection, get_job_for_user, AUTO_PK, init_db
+from backend.auth import get_current_user, init_auth_db
 
 router = APIRouter(prefix="/api", tags=["cover-letters"])
 
@@ -26,13 +26,18 @@ class CoverLetterResponse(BaseModel):
 
 def init_cover_letter_db():
     """Initialize cover letter tables."""
+    # This module self-initializes at import time, which can run before main.py's
+    # init calls. Postgres (unlike SQLite) requires FK target tables to exist at
+    # CREATE TABLE, so ensure jobs/users are created first — both are idempotent.
+    init_db()
+    init_auth_db()
     conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS cover_letters (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             user_id INTEGER NOT NULL,
             job_id INTEGER NOT NULL,
             content TEXT,
@@ -46,9 +51,9 @@ def init_cover_letter_db():
     )
 
     cursor.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS cover_templates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             user_id INTEGER NOT NULL,
             name TEXT,
             content_template TEXT,
@@ -82,7 +87,7 @@ async def generate_cover_letter(data: CoverLetterCreate, user: dict = Depends(ge
         now = datetime.datetime.utcnow().isoformat()
 
         # Placeholder content - in production, this would call Claude
-        content = f"""Dear Hiring Manager,
+        content = """Dear Hiring Manager,
 
 I am writing to express my strong interest in this position. Based on the job description provided, I am confident that my skills and experience make me an excellent fit for this role.
 
@@ -99,14 +104,22 @@ Best regards"""
 
         cursor.execute(
             """
-            INSERT OR REPLACE INTO cover_letters (user_id, job_id, content, generated_at)
+            INSERT INTO cover_letters (user_id, job_id, content, generated_at)
             VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, job_id) DO UPDATE SET
+                content = EXCLUDED.content,
+                generated_at = EXCLUDED.generated_at
             """,
             (user["id"], data.job_id, content, now),
         )
         conn.commit()
 
-        cover_letter_id = cursor.lastrowid
+        # lastrowid is unreliable after an upsert-update; fetch the id by unique key.
+        cursor.execute(
+            "SELECT id FROM cover_letters WHERE user_id = ? AND job_id = ?",
+            (user["id"], data.job_id),
+        )
+        cover_letter_id = cursor.fetchone()["id"]
         conn.close()
 
         return {

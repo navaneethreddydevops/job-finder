@@ -21,12 +21,13 @@ import {
   Copy,
   Clock,
   BarChart3,
-  Settings as SettingsIcon,
+  Check,
+  LayoutGrid,
+  List,
 } from 'lucide-react';
 import UserMenu from './components/UserMenu.jsx';
 import { useToast } from './components/Toast.jsx';
 import ApplicationStatus from './components/ApplicationStatus.jsx';
-import ThemeToggle from './components/ThemeToggle.jsx';
 import ExportButton from './components/ExportButton.jsx';
 import { apiFetch, apiUrl } from './auth';
 import { useDarkMode } from './hooks/useDarkMode';
@@ -41,6 +42,7 @@ function timeAgo(isoStr) {
   if (diff < 60) return `${Math.floor(diff)}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
   return null;
 }
 
@@ -94,14 +96,20 @@ function Dashboard() {
     rejected_count: 0,
   });
 
+  // Search customization state
+  const [jobTypes, setJobTypes] = useState(new Set(['fulltime', 'remote']));
+  const [timePeriodDays, setTimePeriodDays] = useState(7);
+
   // filters
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedC2C, setSelectedC2C] = useState('All');
   const [selectedSource, setSelectedSource] = useState('All');
   const [selectedLocation, setSelectedLocation] = useState('All');
   const [selectedApplied, setSelectedApplied] = useState('All');
 
   // UI state
+  const [viewMode, setViewMode] = useState(
+    () => localStorage.getItem('jf_view_mode') || 'grid'
+  );
   const [currentPage, setCurrentPage] = useState(1);
   const [filterOpen, setFilterOpen] = useState(false);
   const [consoleOpen, setConsoleOpen] = useState(false);
@@ -124,18 +132,29 @@ function Dashboard() {
   stateRef.current = {
     jobs, filteredJobs: [],
     query, status, logs, searchTerm,
-    selectedC2C, selectedLocation, selectedSource, selectedApplied, selectedJob,
+    selectedLocation, selectedSource, selectedApplied, selectedJob,
   };
 
-  // ── 24h freshness filter ────────────────────────────────────────────────────
-  const isWithin24h = (job) => {
-    if (job.posted_within_24h) return true;
+  // ── freshness filter ────────────────────────────────────────────────────────
+  // The scouts already constrain every search to the selected window at the source
+  // (LinkedIn f_TPR, Workday "last week", etc.), so a job the agent returned is
+  // in-window by construction. This filter is only a safety net: KEEP by default and
+  // drop a job ONLY when its free-text date_posted positively proves it's older than
+  // the selected window. Do NOT drop jobs whose date is missing/unparseable — that
+  // silently hid every job when the backend flag was absent (posted_within_7d=0,
+  // date_posted=null). Window respects the user's timePeriodDays, not a hardcoded 7.
+  const isWithinWindow = (job) => {
+    if (job.posted_within_7d) return true;
     const d = (job.date_posted || '').toLowerCase();
-    if (!d) return false;
-    if (/(just|now|moment|today|hour|minute|second)/.test(d)) return true;
+    if (!d) return true; // no date info — trust the agent's server-side window filter
+    if (/(just|now|moment|today|yesterday|hour|minute|second)/.test(d)) return true;
     const dayMatch = d.match(/(\d+)\s*day/);
-    if (dayMatch && parseInt(dayMatch[1], 10) <= 1) return true;
-    return false;
+    if (dayMatch) return parseInt(dayMatch[1], 10) <= timePeriodDays;
+    const weekMatch = d.match(/(\d+)\s*week/);
+    if (weekMatch) return parseInt(weekMatch[1], 10) * 7 <= timePeriodDays;
+    const monthMatch = d.match(/(\d+)\s*month/);
+    if (monthMatch) return parseInt(monthMatch[1], 10) * 30 <= timePeriodDays;
+    return true; // unrecognized format — keep rather than silently drop
   };
 
   // ── data fetching ───────────────────────────────────────────────────────────
@@ -145,7 +164,7 @@ function Dashboard() {
       const resp = await apiFetch('/api/jobs');
       if (resp.ok) {
         const data = await resp.json();
-        const fresh = (data.jobs || []).filter(isWithin24h);
+        const fresh = (data.jobs || []).filter(isWithinWindow);
         setJobs(fresh);
         if (fresh.length > 0) setFilterOpen(true);
         if (showToast) addToast('Database synced', 'success');
@@ -267,7 +286,11 @@ function Dashboard() {
         const resp = await apiFetch('/api/pull', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: queryValue }),
+          body: JSON.stringify({
+            query: queryValue,
+            job_types: Array.from(jobTypes),
+            time_period_days: timePeriodDays,
+          }),
         });
         if (resp.ok) {
           setStatus({ status: 'running', query: queryValue });
@@ -306,7 +329,33 @@ function Dashboard() {
     fetchJobs();
     fetchAppStats();
     fetchBookmarkCount();
-    fetchStatus();
+
+    // Check if an agent is already running (e.g. from a page refresh)
+    const checkAgentStatus = async () => {
+      try {
+        const resp = await fetch(apiUrl('/api/status'));
+        if (resp.ok) {
+          const data = await resp.json();
+          setStatus(data);
+          if (data.status === 'running' && data.query) {
+            // Agent is still running (e.g. the user refreshed mid-run). Reconnect to the
+            // stream; the backend replays this run's buffered log lines, so the console
+            // repopulates via the normal onmessage handler. `logs` stays at its []
+            // default and fills with strings — do NOT seed it with a placeholder object,
+            // which would break formatLog()/copyLog() (they expect strings).
+            setQuery(data.query);
+            setConsoleOpen(true);
+            setAgentStartTime(performance.now());
+            startStreaming();
+          }
+        }
+      } catch (err) {
+        console.error('Failed to check agent status on mount:', err);
+        fetchStatus();
+      }
+    };
+    checkAgentStatus();
+
     return () => { if (eventSourceRef.current) eventSourceRef.current.close(); };
   }, []);
 
@@ -322,6 +371,11 @@ function Dashboard() {
     const interval = setInterval(check, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  // persist the jobs view mode (grid / list)
+  useEffect(() => {
+    localStorage.setItem('jf_view_mode', viewMode);
+  }, [viewMode]);
 
   // status polling while running
   useEffect(() => {
@@ -407,19 +461,18 @@ function Dashboard() {
         job.company.toLowerCase().includes(sl) ||
         job.description.toLowerCase().includes(sl) ||
         job.key_requirements.some(r => r.toLowerCase().includes(sl));
-      const matchesC2C = selectedC2C === 'All' || job.c2c_viability === selectedC2C;
       const matchesSource = selectedSource === 'All' || job.source === selectedSource;
       const isRemote = job.location.toLowerCase().includes('remote');
       const matchesLocation = selectedLocation === 'All' ||
         (selectedLocation === 'Remote' ? isRemote : !isRemote);
       const matchesApplied = selectedApplied === 'All' ||
         (selectedApplied === 'Applied' ? job.applied : !job.applied);
-      return matchesSearch && matchesC2C && matchesSource && matchesLocation && matchesApplied;
+      return matchesSearch && matchesSource && matchesLocation && matchesApplied;
     });
-  }, [jobs, searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied, showBookmarksOnly]);
+  }, [jobs, searchTerm, selectedSource, selectedLocation, selectedApplied, showBookmarksOnly]);
 
   useEffect(() => { setCurrentPage(1); },
-    [searchTerm, selectedC2C, selectedSource, selectedLocation, selectedApplied]);
+    [searchTerm, selectedSource, selectedLocation, selectedApplied]);
 
   stateRef.current.filteredJobs = filteredJobs;
 
@@ -428,7 +481,6 @@ function Dashboard() {
 
   const stats = useMemo(() => ({
     total: jobs.length,
-    confirmedC2C: jobs.filter(j => j.c2c_viability === 'Confirmed C2C').length,
     remote: jobs.filter(j => j.location.toLowerCase().includes('remote')).length,
     applied: jobs.filter(j => j.applied).length,
     applications: appStats.total_applications,
@@ -441,11 +493,11 @@ function Dashboard() {
     return dates.length ? timeAgo(dates[dates.length - 1]) : null;
   }, [jobs]);
 
-  const activeFilterCount = [selectedC2C, selectedLocation, selectedSource, selectedApplied]
+  const activeFilterCount = [selectedLocation, selectedSource, selectedApplied]
     .filter(v => v !== 'All').length;
 
   const clearAllFilters = () => {
-    setSelectedC2C('All'); setSelectedLocation('All');
+    setSelectedLocation('All');
     setSelectedSource('All'); setSelectedApplied('All');
     setSearchTerm('');
   };
@@ -466,8 +518,8 @@ function Dashboard() {
             return {
               total_database_count: cur.jobs.length,
               filtered_display_count: cur.filteredJobs.length,
-              active_filters: { searchTerm: cur.searchTerm, c2cViability: cur.selectedC2C, location: cur.selectedLocation, source: cur.selectedSource, applied: cur.selectedApplied },
-              jobs: cur.filteredJobs.map((j, idx) => ({ index: idx, id: j.id, title: j.title, company: j.company, location: j.location, c2c_viability: j.c2c_viability, source: j.source, applied: j.applied, key_requirements: j.key_requirements })),
+              active_filters: { searchTerm: cur.searchTerm, location: cur.selectedLocation, source: cur.selectedSource, applied: cur.selectedApplied },
+              jobs: cur.filteredJobs.map((j, idx) => ({ index: idx, id: j.id, title: j.title, company: j.company, location: j.location, source: j.source, applied: j.applied, key_requirements: j.key_requirements })),
             };
           },
           annotations: { readOnlyHint: true },
@@ -476,10 +528,9 @@ function Dashboard() {
         modelContext.registerTool({
           name: 'filter_jobs',
           description: 'Apply text search and filter selections in the dashboard viewport.',
-          inputSchema: { type: 'object', properties: { searchTerm: { type: 'string' }, c2cViability: { type: 'string', enum: ['All', 'Confirmed C2C', 'Likely C2C', 'Not Specified'] }, location: { type: 'string', enum: ['All', 'Remote', 'Onsite/Hybrid'] }, source: { type: 'string' }, applied: { type: 'string', enum: ['All', 'Applied', 'Not Applied'] } } },
+          inputSchema: { type: 'object', properties: { searchTerm: { type: 'string' }, location: { type: 'string', enum: ['All', 'Remote', 'Onsite/Hybrid'] }, source: { type: 'string' }, applied: { type: 'string', enum: ['All', 'Applied', 'Not Applied'] } } },
           execute(input) {
             if (input.searchTerm !== undefined) setSearchTerm(input.searchTerm);
-            if (input.c2cViability !== undefined) setSelectedC2C(input.c2cViability);
             if (input.location !== undefined) setSelectedLocation(input.location);
             if (input.source !== undefined) setSelectedSource(input.source);
             if (input.applied !== undefined) setSelectedApplied(input.applied);
@@ -602,7 +653,7 @@ function Dashboard() {
             </div>
           </div>
 
-          {/* nav link — styled differently from action buttons */}
+          {/* Primary navigation */}
           <Link to="/resume/optimizer" className="btn nav-link" title="Resume Optimizer">
             <FileText size={16} />
             <span className="header-btn-label">Resume Optimizer</span>
@@ -613,33 +664,25 @@ function Dashboard() {
             <span className="header-btn-label">Analytics</span>
           </Link>
 
-          <Link to="/settings" className="btn nav-link" title="Settings">
-            <SettingsIcon size={16} />
-            <span className="header-btn-label">Settings</span>
-          </Link>
-
-          {/* Action buttons */}
-          <ExportButton format="csv" />
-          <ThemeToggle />
-
+          {/* Account menu (holds Settings + theme toggle + logout) */}
           <UserMenu />
         </div>
       </header>
 
       {/* ── Stats Cards ────────────────────────────────────────────────────── */}
       <section className="stats-grid" id="stats-summary-panel">
-        <div className="stat-card" id="stat-card-total" title="Total unique job postings fetched within the last 24 hours">
+        <div className="stat-card" id="stat-card-total" title="Total unique remote full-time postings from the last 7 days">
           <div className="stat-icon-wrapper primary"><Layers size={22} /></div>
           <div className="stat-info">
             <span className="stat-label">Total Jobs Found</span>
             <span className="stat-value"><AnimatedNumber value={stats.total} /></span>
           </div>
         </div>
-        <div className="stat-card" id="stat-card-confirmed" title="Jobs explicitly confirmed as Corp-to-Corp eligible">
+        <div className="stat-card" id="stat-card-fulltime" title="Full-time roles from Workday, LinkedIn, and Glassdoor">
           <div className="stat-icon-wrapper success"><CheckCircle2 size={22} /></div>
           <div className="stat-info">
-            <span className="stat-label">Confirmed C2C</span>
-            <span className="stat-value"><AnimatedNumber value={stats.confirmedC2C} /></span>
+            <span className="stat-label">Full-Time Roles</span>
+            <span className="stat-value"><AnimatedNumber value={stats.total} /></span>
           </div>
         </div>
         <div className="stat-card" id="stat-card-remote" title="Jobs listed as fully remote">
@@ -711,7 +754,7 @@ function Dashboard() {
             onSubmit={handlePullJobs}
             className="control-group"
             toolname="trigger_agent_run_form"
-            tooldescription="Trigger a backend web scraper agent run to search for C2C job postings matching a specified search query"
+            tooldescription="Trigger a backend web scraper agent run to search for full-time job postings matching a specified search query"
             toolautosubmit="true"
           >
             <label htmlFor="agent-query-input" className="control-label">Search Target</label>
@@ -722,17 +765,94 @@ function Dashboard() {
               className="input-text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="e.g. C2C Data Engineer"
+              placeholder="e.g. Data Engineer"
               disabled={status.status === 'running'}
-              toolparamdescription="The search query for C2C jobs, for example 'C2C Data Engineer' or 'Corp-to-Corp Data Architect'"
+              toolparamdescription="The search query for full-time jobs, for example 'Data Engineer' or 'Senior Python Developer'"
               required
             />
+
+            {/* Job Type Filters */}
+            <div className="search-option-group">
+              <span className="control-label">Job Type</span>
+              <div className="jobtype-toggles">
+                {[
+                  { key: 'fulltime', label: 'Full-Time' },
+                  { key: 'remote', label: 'Remote' },
+                  { key: 'contract', label: 'Contract' },
+                ].map(({ key, label }) => {
+                  const active = jobTypes.has(key);
+                  return (
+                    <label
+                      key={key}
+                      className={`jobtype-toggle ${active ? 'active' : ''}`}
+                    >
+                      <input
+                        id={`filter-jobtype-${key}`}
+                        type="checkbox"
+                        checked={active}
+                        onChange={(e) => {
+                          const newTypes = new Set(jobTypes);
+                          if (e.target.checked) newTypes.add(key);
+                          else newTypes.delete(key);
+                          setJobTypes(newTypes);
+                        }}
+                        disabled={status.status === 'running'}
+                      />
+                      <span className="jobtype-check">
+                        {active && <Check size={11} strokeWidth={3} />}
+                      </span>
+                      {label}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Time Period Slider */}
+            <div className="search-option-group">
+              <div className="time-period-header">
+                <label htmlFor="time-period-slider" className="control-label">Posted Within</label>
+                <span className="time-period-value">
+                  {timePeriodDays === 1 ? '24 hrs' : `${timePeriodDays} days`}
+                </span>
+              </div>
+              <input
+                id="time-period-slider"
+                className="range-slider"
+                type="range"
+                min="1"
+                max="90"
+                value={timePeriodDays}
+                onChange={(e) => setTimePeriodDays(parseInt(e.target.value, 10))}
+                disabled={status.status === 'running'}
+              />
+              <div className="time-presets">
+                {[
+                  { days: 1, label: '24 Hours' },
+                  { days: 7, label: '1 Week' },
+                  { days: 14, label: '2 Weeks' },
+                  { days: 30, label: '1 Month' },
+                  { days: 90, label: '3 Months' },
+                ].map(({ days, label }) => (
+                  <button
+                    key={days}
+                    type="button"
+                    className={`time-preset ${timePeriodDays === days ? 'active' : ''}`}
+                    onClick={() => setTimePeriodDays(days)}
+                    disabled={status.status === 'running'}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <button
               id="trigger-agent-btn"
               type="submit"
               className="btn btn-primary"
               disabled={status.status === 'running' || !query.trim()}
-              style={{ marginTop: '0.5rem' }}
+              style={{ marginTop: '1rem' }}
             >
               <RefreshCw size={16} className={status.status === 'running' ? 'spin' : ''} />
               {status.status === 'running' ? 'Agent Running…' : 'Trigger Agent Run'}
@@ -866,22 +986,6 @@ function Dashboard() {
               </div>
 
               <div className="control-group">
-                <span className="control-label">C2C Viability</span>
-                <div className="filter-pills">
-                  {['All', 'Confirmed C2C', 'Likely C2C', 'Not Specified'].map((opt) => (
-                    <button
-                      key={opt}
-                      id={`filter-c2c-${opt.replace(/\s+/g, '-').toLowerCase()}`}
-                      className={`filter-pill ${selectedC2C === opt ? 'active' : ''}`}
-                      onClick={() => setSelectedC2C(opt)}
-                    >
-                      {opt}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="control-group">
                 <span className="control-label">Location Type</span>
                 <div className="filter-pills">
                   {['All', 'Remote', 'Onsite/Hybrid'].map((opt) => (
@@ -991,27 +1095,52 @@ function Dashboard() {
               <span className="panel-title-count"> ({filteredJobs.length} visible)</span>
             </h2>
 
-            <form
-              id="filter-form"
-              onSubmit={handleFilterFormSubmit}
-              style={{ position: 'relative', width: '260px' }}
-              toolname="search_jobs_form"
-              tooldescription="Search and filter the currently loaded jobs in the local dashboard UI"
-              toolautosubmit="true"
-            >
-              <input
-                id="local-search-input"
-                name="searchTerm"
-                type="text"
-                className="input-text"
-                style={{ paddingLeft: '2.25rem', paddingRight: '2.5rem' }}
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search jobs… (/)"
-                toolparamdescription="Text query to search within titles, companies, or requirements"
-              />
-              <Search size={16} className="text-muted" style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
-            </form>
+            <div className="panel-toolbar">
+              <form
+                id="filter-form"
+                onSubmit={handleFilterFormSubmit}
+                style={{ position: 'relative', flex: 1, minWidth: '200px' }}
+                toolname="search_jobs_form"
+                tooldescription="Search and filter the currently loaded jobs in the local dashboard UI"
+                toolautosubmit="true"
+              >
+                <input
+                  id="local-search-input"
+                  name="searchTerm"
+                  type="text"
+                  className="input-text"
+                  style={{ paddingLeft: '2.25rem', paddingRight: '2.5rem' }}
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Search jobs… (/)"
+                  toolparamdescription="Text query to search within titles, companies, or requirements"
+                />
+                <Search size={16} className="text-muted" style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+              </form>
+              <div className="view-toggle" role="group" aria-label="Job view mode" id="view-mode-toggle">
+                <button
+                  type="button"
+                  id="view-mode-grid"
+                  className={`view-toggle-btn ${viewMode === 'grid' ? 'active' : ''}`}
+                  onClick={() => setViewMode('grid')}
+                  aria-pressed={viewMode === 'grid'}
+                  title="Tile view"
+                >
+                  <LayoutGrid size={16} />
+                </button>
+                <button
+                  type="button"
+                  id="view-mode-list"
+                  className={`view-toggle-btn ${viewMode === 'list' ? 'active' : ''}`}
+                  onClick={() => setViewMode('list')}
+                  aria-pressed={viewMode === 'list'}
+                  title="List view"
+                >
+                  <List size={16} />
+                </button>
+              </div>
+              <ExportButton format="csv" />
+            </div>
           </div>
 
           {/* Active filter tags */}
@@ -1021,12 +1150,6 @@ function Dashboard() {
                 <span className="active-filter-tag">
                   {selectedApplied}
                   <button onClick={() => setSelectedApplied('All')} aria-label="Remove applied filter"><X size={10} /></button>
-                </span>
-              )}
-              {selectedC2C !== 'All' && (
-                <span className="active-filter-tag">
-                  {selectedC2C}
-                  <button onClick={() => setSelectedC2C('All')} aria-label="Remove C2C filter"><X size={10} /></button>
                 </span>
               )}
               {selectedLocation !== 'All' && (
@@ -1047,7 +1170,7 @@ function Dashboard() {
 
           {/* Job list — skeleton / results / empty state */}
           {jobsLoading ? (
-            <div className="jobs-grid" id="jobs-grid">
+            <div className={`jobs-grid ${viewMode === 'list' ? 'list-view' : ''}`} id="jobs-grid">
               {[1, 2, 3].map(i => (
                 <div key={i} className="job-card skeleton-card">
                   <div className="skeleton skeleton-title" />
@@ -1063,7 +1186,7 @@ function Dashboard() {
             </div>
           ) : filteredJobs.length > 0 ? (
             <>
-              <div className="jobs-grid" id="jobs-grid">
+              <div className={`jobs-grid ${viewMode === 'list' ? 'list-view' : ''}`} id="jobs-grid">
                 {paginatedJobs.map((job, localIdx) => {
                   const absoluteIdx = (currentPage - 1) * JOBS_PER_PAGE + localIdx;
                   return (
@@ -1120,13 +1243,10 @@ function Dashboard() {
 
                       <div className="job-meta-row">
                         <span className="job-meta-item"><MapPin size={12} />{job.location}</span>
-                        <span className="job-meta-item"><Calendar size={12} />{job.date_posted}</span>
+                        <span className="job-meta-item"><Calendar size={12} />{job.date_posted || 'Recently posted'}</span>
                       </div>
 
                       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                        <span className={`badge ${job.c2c_viability === 'Confirmed C2C' ? 'badge-c2c-confirmed' : job.c2c_viability === 'Likely C2C' ? 'badge-c2c-likely' : 'badge-c2c-unknown'}`}>
-                          {job.c2c_viability}
-                        </span>
                         <span className="badge badge-source">{job.source}</span>
                         {job.applied && (
                           <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(42,126,79,0.2)', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
@@ -1135,16 +1255,24 @@ function Dashboard() {
                         )}
                       </div>
 
-                      <p className="job-desc-preview">{job.description}</p>
+                      {job.description ? (
+                        <p className="job-desc-preview">{job.description}</p>
+                      ) : (
+                        <p className="job-desc-preview job-desc-empty">
+                          No description captured — open the original posting for details.
+                        </p>
+                      )}
 
-                      <div className="job-requirements">
-                        {job.key_requirements.slice(0, 4).map((req, rIdx) => (
-                          <span key={rIdx} className="requirement-tag">{req}</span>
-                        ))}
-                        {job.key_requirements.length > 4 && (
-                          <span className="requirement-tag">+{job.key_requirements.length - 4} more</span>
-                        )}
-                      </div>
+                      {job.key_requirements.length > 0 && (
+                        <div className="job-requirements">
+                          {job.key_requirements.slice(0, 4).map((req, rIdx) => (
+                            <span key={rIdx} className="requirement-tag">{req}</span>
+                          ))}
+                          {job.key_requirements.length > 4 && (
+                            <span className="requirement-tag">+{job.key_requirements.length - 4} more</span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1170,7 +1298,7 @@ function Dashboard() {
               </h3>
               <p className="empty-state-desc">
                 {jobs.length === 0
-                  ? 'Enter a search target and trigger the agent to scour job boards for Corp-to-Corp positions.'
+                  ? 'Enter a search target and trigger the agent to find full-time roles on Workday, LinkedIn, and Glassdoor.'
                   : 'No jobs match your active filters.'}
               </p>
               {jobs.length === 0 ? (
@@ -1223,12 +1351,9 @@ function Dashboard() {
                 </span>
               </div>
               <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                <span className={`badge ${selectedJob.c2c_viability === 'Confirmed C2C' ? 'badge-c2c-confirmed' : selectedJob.c2c_viability === 'Likely C2C' ? 'badge-c2c-likely' : 'badge-c2c-unknown'}`}>
-                  {selectedJob.c2c_viability}
-                </span>
                 <span className="badge badge-source">{selectedJob.source}</span>
-                <span className="badge badge-c2c-unknown" style={{ textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
-                  <Calendar size={11} />Found: {selectedJob.date_posted}
+                <span className="badge badge-neutral" style={{ textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
+                  <Calendar size={11} />Found: {selectedJob.date_posted || 'Recently'}
                 </span>
                 {selectedJob.applied && (
                   <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(42,126,79,0.2)', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
@@ -1280,18 +1405,23 @@ function Dashboard() {
               )}
 
               <div className="modal-section" id="modal-section-description">
-                <span className="modal-section-title">Job Description & C2C Analysis</span>
-                <p className="modal-desc-text">{selectedJob.description}</p>
+                <span className="modal-section-title">Job Description</span>
+                <p className={`modal-desc-text ${selectedJob.description ? '' : 'job-desc-empty'}`}>
+                  {selectedJob.description
+                    || 'No description was captured for this posting. Use “View Original Posting” above to read the full details on the source site.'}
+                </p>
               </div>
 
-              <div className="modal-section" id="modal-section-requirements">
-                <span className="modal-section-title">Required Technical Stack</span>
-                <div className="job-requirements" style={{ gap: '0.5rem', marginTop: '0.25rem' }}>
-                  {selectedJob.key_requirements.map((req, idx) => (
-                    <span key={idx} className="requirement-tag" style={{ padding: '0.3rem 0.65rem', fontSize: '0.8rem' }}>{req}</span>
-                  ))}
+              {selectedJob.key_requirements.length > 0 && (
+                <div className="modal-section" id="modal-section-requirements">
+                  <span className="modal-section-title">Required Technical Stack</span>
+                  <div className="job-requirements" style={{ gap: '0.5rem', marginTop: '0.25rem' }}>
+                    {selectedJob.key_requirements.map((req, idx) => (
+                      <span key={idx} className="requirement-tag" style={{ padding: '0.3rem 0.65rem', fontSize: '0.8rem' }}>{req}</span>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           </>
         )}

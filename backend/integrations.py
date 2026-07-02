@@ -1,10 +1,10 @@
 """Slack and Discord integrations."""
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import datetime
 import aiohttp
-from backend.db import get_db_connection
+from backend.db import get_db_connection, AUTO_PK
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["integrations"])
@@ -23,14 +23,14 @@ def init_integrations_db():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS integrations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
+            id {AUTO_PK},
+            user_id INTEGER NOT NULL,
             type TEXT NOT NULL,
             webhook_url TEXT NOT NULL,
             channel_name TEXT,
-            is_active BOOLEAN DEFAULT 1,
+            is_active BOOLEAN DEFAULT TRUE,
             filter_min_score INTEGER,
             created_at TEXT NOT NULL,
             UNIQUE(user_id, type)
@@ -59,9 +59,14 @@ async def create_integration(
         cursor = conn.cursor()
 
         cursor.execute(
-            """INSERT OR REPLACE INTO integrations
+            """INSERT INTO integrations
             (user_id, type, webhook_url, channel_name, is_active, filter_min_score, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, type) DO UPDATE SET
+                webhook_url = EXCLUDED.webhook_url,
+                channel_name = EXCLUDED.channel_name,
+                is_active = EXCLUDED.is_active,
+                filter_min_score = EXCLUDED.filter_min_score""",
             (
                 user["id"],
                 data.type,
@@ -73,7 +78,12 @@ async def create_integration(
             ),
         )
         conn.commit()
-        integration_id = cursor.lastrowid
+        # lastrowid is unreliable after an upsert-update; fetch the id by unique key.
+        cursor.execute(
+            "SELECT id FROM integrations WHERE user_id = ? AND type = ?",
+            (user["id"], data.type),
+        )
+        integration_id = cursor.fetchone()["id"]
         conn.close()
 
         return {
