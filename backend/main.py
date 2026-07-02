@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+from collections import deque
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -20,50 +21,18 @@ from db import (
 )
 from auth import init_auth_db, router as auth_router, get_current_user
 from resume import init_resume_db, router as resume_router
-from applications import router as applications_router
-from bookmarks import router as bookmarks_router
-from searches import router as searches_router
-from salary import router as salary_router
-from skills import router as skills_router
-from scoring import router as scoring_router, init_scoring_db
-from cover_letters import router as cover_letters_router, init_cover_letter_db
-from interviews import router as interviews_router, init_interview_db
-from comparison import router as comparison_router
-from analytics import router as analytics_router, init_analytics_db
-from email_service import router as email_router
-from webhooks import router as webhooks_router, init_webhooks_db
-from integrations import router as integrations_router, init_integrations_db
 from rate_limit import enforce_rate_limit, RateLimitConfig
 
 # Initialize database schema
 init_db()
 init_auth_db()
 init_resume_db()
-init_scoring_db()
-init_cover_letter_db()
-init_interview_db()
-init_analytics_db()
-init_webhooks_db()
-init_integrations_db()
 
 app = FastAPI(title="Job Finder Backend")
 
-# All routers
+# Core routers (job search, auth, resume)
 app.include_router(auth_router)
 app.include_router(resume_router)
-app.include_router(applications_router)
-app.include_router(bookmarks_router)
-app.include_router(searches_router)
-app.include_router(salary_router)
-app.include_router(skills_router)
-app.include_router(scoring_router)
-app.include_router(cover_letters_router)
-app.include_router(interviews_router)
-app.include_router(comparison_router)
-app.include_router(analytics_router)
-app.include_router(email_router)
-app.include_router(webhooks_router)
-app.include_router(integrations_router)
 
 # CORS middleware for local development
 app.add_middleware(
@@ -77,12 +46,12 @@ app.add_middleware(
 # Backend state variables
 agent_status = {"status": "idle", "query": None, "session_id": None}
 log_queues = []
+LOG_HISTORY_MAX = 1500
 # In-memory buffer of the current run's log lines so a client that reconnects
 # (e.g. after a browser refresh) can replay what was already emitted. Bounded to
 # cap memory; the run itself is in-memory, so surviving a browser refresh — not a
-# server restart — is the intended scope.
-log_history: list[str] = []
-LOG_HISTORY_MAX = 1500
+# server restart — is the intended scope. Uses deque with maxlen for efficient append.
+log_history: deque = deque(maxlen=LOG_HISTORY_MAX)
 
 
 class PullRequest(BaseModel):
@@ -97,11 +66,10 @@ class PullRequest(BaseModel):
 
 async def publish_log(msg: str):
     """Broadcasts a log message to all active stream connections and buffers it so
-    reconnecting clients can replay the current run's history."""
+    reconnecting clients can replay the current run's history. Deque automatically
+    evicts oldest entries when maxlen is exceeded."""
     print(msg, flush=True)
     log_history.append(msg)
-    if len(log_history) > LOG_HISTORY_MAX:
-        del log_history[: len(log_history) - LOG_HISTORY_MAX]
     for q in list(log_queues):
         try:
             await q.put(msg)
@@ -117,6 +85,7 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
     import uuid
 
     try:
+        total_jobs_count = 0
 
         async def log_callback(thought: str):
             await publish_log(thought)
@@ -124,6 +93,7 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
         async def batch_callback(jobs_batch):
             """Persist a scout's batch of jobs the moment it finishes, so the UI fills
             in incrementally instead of waiting for the whole agent run to complete."""
+            nonlocal total_jobs_count
             inserted = 0
             for job in jobs_batch:
                 job_dict = (
@@ -136,9 +106,10 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
                         inserted += 1
                 except Exception:
                     pass
+            total_jobs_count += inserted
             await publish_log(
                 f"\n[Backend] Saved a batch of {len(jobs_batch)} jobs "
-                f"({inserted} new). Database now holds {len(get_user_jobs(user_id))} total jobs.\n"
+                f"({inserted} new). Database now holds {total_jobs_count} total jobs.\n"
             )
 
         # Initialize a new session ID every time to prevent corrupted resume states
