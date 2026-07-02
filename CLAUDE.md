@@ -5,9 +5,10 @@ Guidance for Claude Code (and other AI agents) working in this repository.
 ## What this is
 
 A full-stack **Job Finder**. An autonomous agent built on the **Claude Agent SDK** researches
-two sources — **LinkedIn (`linkedin.com/jobs`) and Workday-hosted company careers portals
-(`*.myworkdayjobs.com`)** — for **remote, full-time** jobs posted in the **last 7 days**, using
-parallel `job_scout` subagents. It always searches a fixed set of Principal-level platform/infra
+five sources — **LinkedIn (`linkedin.com/jobs`) and the ATS-hosted company careers portals
+Workday (`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io` / `job-boards.greenhouse.io`),
+Lever (`jobs.lever.co`), and Ashby (`jobs.ashbyhq.com`)** — for **remote, full-time** jobs posted
+in the **last 7 days**, using parallel `job_scout` subagents. It always searches a fixed set of Principal-level platform/infra
 roles (DevOps, Cloud, Kubernetes, SRE), plus any extra role the user types. Results are extracted as
 structured JSON and stored in SQLite. A **FastAPI** backend exposes the agent + data over REST/SSE,
 and a **Vite + React** dashboard renders the results with live agent-thought streaming.
@@ -85,10 +86,11 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
 
 - The orchestrator always searches a fixed set of `DEFAULT_ROLES` (Principal DevOps / Cloud /
   Kubernetes / Site Reliability Engineer) and appends any non-empty user query as an extra role. It
-  fans the research out by spawning one `job_scout` **per role × source** via the built-in **Task
-  tool** — **LinkedIn (`linkedin.com/jobs`) and Workday careers portals (`*.myworkdayjobs.com`) only**
-  (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter) — running them in parallel, then merges and
-  de-duplicates the results.
+  searches every **role × source** pair itself with the Exa/Tavily tools (in-process SDK MCP
+  tools can't be granted to subagents) — **LinkedIn plus the Workday/Greenhouse/Lever/Ashby
+  careers portals only** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter) — then spawns
+  `job_scout` subagents in parallel (via the built-in **Task** tool) to verify + format batches
+  of 30-40 candidates, and finally merges and de-duplicates the results.
 - **Tools granted to both agents** (`AGENT_ALLOWED_TOOLS` and `SCOUT_ALLOWED_TOOLS`):
   - **File operations**: `Read`, `Write`, `Edit` — for processing and storing job data
   - **System operations**: `Bash`, `Glob`, `Grep` — for data processing and filtering
@@ -111,13 +113,17 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
 - **Remote, full-time only**: The agent keeps only remote full-time (FTE) roles and excludes
   non-remote, contract, temporary, internship, and part-time roles.
 
-### Always-searched roles + two sources only — LinkedIn, Workday
+### Always-searched roles + fixed sources — LinkedIn plus ATS careers portals
 The agent always researches `DEFAULT_ROLES` in `agent.py` (Principal DevOps / Cloud / Kubernetes /
 Site Reliability Engineer); a non-empty user query is added as an extra role. Sources are fixed to
-`SEARCH_SOURCES = ["LinkedIn", "Workday"]` — **LinkedIn (`linkedin.com/jobs`) and Workday careers
-portals (`*.myworkdayjobs.com`)**. Do not reintroduce Glassdoor, Dice, Monster, Indeed, ZipRecruiter,
-or any other board. The source list and role list are intentionally fixed in `agent.py`'s scout
-prompt, system prompt, and run prompt. The `source` field is one of `'Workday'` or `'LinkedIn'`.
+`SEARCH_SOURCES = ["LinkedIn", "Workday", "Greenhouse", "Lever", "Ashby"]` — **LinkedIn
+(`linkedin.com/jobs`) and the ATS-hosted careers portals Workday (`*.myworkdayjobs.com`),
+Greenhouse (`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever (`jobs.lever.co`), and
+Ashby (`jobs.ashbyhq.com`)** — all direct employer postings with reliable dates. Do not
+reintroduce aggregator boards (Glassdoor, Dice, Monster, Indeed, ZipRecruiter): stale reposts,
+scrape-hostile, unreliable dates. The source list and role list are intentionally fixed in
+`agent.py`'s scout prompt and run prompt. The `source` field is one of `'LinkedIn'`, `'Workday'`,
+`'Greenhouse'`, `'Lever'`, or `'Ashby'`.
 
 ### Pull as many fresh roles as possible
 There is **no upper limit** on job count — more is better. Do not reintroduce a fixed
@@ -147,7 +153,8 @@ Job discovery is done via the **Exa** and **Tavily** search APIs, exposed to the
 **in-process SDK MCP tools** (`create_sdk_mcp_server` → server name `jobsearch`):
 
 - `mcp__jobsearch__exa_search(query, source)` and `mcp__jobsearch__tavily_search(query, source)` —
-  each scopes results to the assigned source's domain (`linkedin.com` or `myworkdayjobs.com`),
+  each scopes results to the assigned source's domain(s) (`linkedin.com`, `myworkdayjobs.com`,
+  `boards.greenhouse.io`/`job-boards.greenhouse.io`, `jobs.lever.co`, `jobs.ashbyhq.com`),
   enforces the last-7-days window, and returns a compact JSON list of candidate postings
   (`title, url, published_date, snippet`). These are the **primary** discovery tools and the reason
   recall is high (the built-in `WebSearch` alone returned too few results).
@@ -157,8 +164,8 @@ Job discovery is done via the **Exa** and **Tavily** search APIs, exposed to the
 - `WebSearch` — fallback web search when a search API key is unavailable.
 - `WebFetch` — opens and reads individual listings to verify dates, that the role is remote + full-time, and extract fields.
 
-Do not reintroduce other boards into `search_tools.py`'s domain map — only `linkedin.com` and
-`myworkdayjobs.com` are allowed.
+Do not add aggregator boards to `search_tools.py`'s domain map — only the LinkedIn +
+Workday/Greenhouse/Lever/Ashby domains in `ALL_SOURCE_DOMAINS` are allowed.
 
 ## Persistence (`backend/db.py` — dual backend: SQLite local, Postgres/Neon prod)
 
