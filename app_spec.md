@@ -11,11 +11,13 @@ It is the source of truth for the work and should be kept in sync with the code.
 Reference: https://code.claude.com/docs/en/agent-sdk/overview
 
 The job-finder orchestrator (`backend/agent.py`) researches **remote, full-time** jobs across exactly
-two sources: **LinkedIn (`linkedin.com/jobs`) and Workday-hosted careers portals
-(`*.myworkdayjobs.com`)** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter). It always searches a fixed
+five sources: **LinkedIn (`linkedin.com/jobs`) and the ATS-hosted careers portals Workday
+(`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever
+(`jobs.lever.co`), and Ashby (`jobs.ashbyhq.com`)** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter —
+aggregator boards are banned). It always searches a fixed
 set of Principal-level roles (`DEFAULT_ROLES`: DevOps, Cloud, Kubernetes, SRE) plus any extra typed
-query, keeping only postings from the **last 7 days**, and fans out one `job_scout` subagent per
-role × source. The agent is granted the **full built-in toolset** (no MCP integration), with behavior
+query, keeping only postings from the **last 7 days**; the orchestrator runs the searches itself and
+hands batches of candidates to parallel `job_scout` subagents for verification and formatting. The agent is granted the **full built-in toolset** (no MCP integration), with behavior
 intentional and documented.
 
 **Built-in tools granted to orchestrator** (per the Agent SDK overview):

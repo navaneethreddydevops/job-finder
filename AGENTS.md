@@ -6,8 +6,8 @@ the **Claude Agent SDK** (`claude-agent-sdk`). The implementation lives in
 
 ## Overview
 
-The Job Finder is a specialized autonomous agent that researches **LinkedIn and Workday
-careers portals** for **remote, full-time** positions in a fixed set of Principal-level
+The Job Finder is a specialized autonomous agent that researches **LinkedIn and the
+Workday/Greenhouse/Lever/Ashby careers portals** for **remote, full-time** positions in a fixed set of Principal-level
 platform/infra roles (DevOps, Cloud, Kubernetes, SRE) — plus any extra role the user types —
 **posted within the last 7 days**. It runs asynchronously as a FastAPI background task,
 delegates breadth to parallel subagents (one per role × source), evaluates findings against
@@ -36,7 +36,7 @@ API key. See `render.yaml`, `backend/Dockerfile.render`, and the README "Cloud D
 The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
 * **Model**: `model=None` — inherits whatever model the `claude` CLI is logged in with.
-* **max_turns**: `80` (multi-agent fan-out needs headroom).
+* **max_turns**: `150` (4-5 roles × 5 sources × 2 search tools plus parallel scout batches).
 * **permission_mode**: `bypassPermissions`.
 * **allowed_tools**: `AGENT_ALLOWED_TOOLS` grants the built-in toolset (`Read`, `Write`,
   `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite`) **plus** the
@@ -50,19 +50,20 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 ### Orchestrator + subagent design
 
 * The **orchestrator** always searches `DEFAULT_ROLES` (Principal DevOps / Cloud / Kubernetes /
-  Site Reliability Engineer) plus any user-supplied extra role, and spawns one `job_scout`
-  **per role × source** via the Task tool — **LinkedIn (`linkedin.com/jobs`) and Workday careers
-  portals (`*.myworkdayjobs.com`) only** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter) — running
-  them in parallel, then merges and de-duplicates the combined results.
-* Each **`job_scout`** is given one role, one source, and the run date, and returns a
-  JSON array of remote full-time jobs for that pair. Scouts discover listings with the
-  `exa_search` + `tavily_search` tools, read them with `WebFetch`, and fall back to `WebSearch`
-  if a search-API key is missing (`model="inherit"`).
+  Site Reliability Engineer) plus any user-supplied extra role. It runs the `exa_search` +
+  `tavily_search` tools itself for **every role × source** pair (in-process SDK MCP tools can't
+  be granted to subagents) — **LinkedIn (`linkedin.com/jobs`) and the ATS careers portals
+  Workday (`*.myworkdayjobs.com`), Greenhouse, Lever, and Ashby only** (no
+  Glassdoor/Dice/Monster/Indeed/ZipRecruiter) — then merges and de-duplicates the combined results.
+* Each **`job_scout`** is handed a batch of 30-40 pre-annotated candidate postings and returns a
+  JSON array of verified remote full-time jobs; scouts run in parallel while the orchestrator
+  keeps searching, and may use `WebFetch`/`WebSearch` to verify borderline candidates.
 
 ### Goals & constraints
 
-* **Sources**: ONLY LinkedIn and Workday careers portals — fixed in `agent.py`
-  (`SEARCH_SOURCES`, scout prompt, system prompt, run prompt). Do not add other boards.
+* **Sources**: ONLY LinkedIn and the Workday/Greenhouse/Lever/Ashby careers portals — fixed
+  in `agent.py` (`SEARCH_SOURCES`, scout prompt, run prompt). Do not add aggregator boards
+  (Indeed, Glassdoor, Dice, Monster, ZipRecruiter).
 * **Roles**: always search `DEFAULT_ROLES`; a non-empty query is appended as an extra role.
 * **Remote-only**: every kept job must be remote.
 * **Volume**: pull **as many** matching jobs as possible — there is no upper limit (the
@@ -79,8 +80,9 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
 Job discovery uses the **Exa** and **Tavily** search APIs, wrapped as in-process SDK MCP tools
 (`create_sdk_mcp_server`, server name `jobsearch`). Keys come from env `EXA_API_KEY` /
-`TAVILY_API_KEY` (never hardcoded). The domain map allows only `linkedin.com` and
-`myworkdayjobs.com`.
+`TAVILY_API_KEY` (never hardcoded). The domain map (`ALL_SOURCE_DOMAINS`) allows only
+`linkedin.com`, `myworkdayjobs.com`, `boards.greenhouse.io`/`job-boards.greenhouse.io`,
+`jobs.lever.co`, and `jobs.ashbyhq.com`.
 
 ### 1. `mcp__jobsearch__exa_search(query, source)` / `mcp__jobsearch__tavily_search(query, source)`
 * **Purpose**: Primary job discovery. Each scopes results to the assigned source's domain and the
@@ -89,9 +91,9 @@ Job discovery uses the **Exa** and **Tavily** search APIs, wrapped as in-process
   clear message and the agent falls back to `WebSearch`.
 
 ### 2. `WebSearch` (fallback)
-* **Purpose**: Run targeted web queries scoped to the two allowed sources (e.g.
-  `Principal SRE remote site:linkedin.com/jobs`, `Principal SRE remote site:myworkdayjobs.com`)
-  when a search-API key is unavailable.
+* **Purpose**: Run targeted web queries scoped to the allowed sources (e.g.
+  `Principal SRE remote site:linkedin.com/jobs`, `Principal SRE remote site:myworkdayjobs.com`,
+  `Principal SRE remote site:boards.greenhouse.io`) when a search-API key is unavailable.
 
 ### 3. `WebFetch`
 * **Purpose**: Open and read individual job listings to verify posting dates / remote + full-time
@@ -144,7 +146,7 @@ class JobItem(BaseModel):
     key_requirements: list   # List of technical skills
     contact_email: str | None
     contact_phone: str | None
-    source: str              # Portal source: 'Workday' or 'LinkedIn'
+    source: str              # Portal source: 'LinkedIn', 'Workday', 'Greenhouse', 'Lever', or 'Ashby'
     description: str          # Short job description summary
 
 class JobList(BaseModel):
