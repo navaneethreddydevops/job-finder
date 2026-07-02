@@ -1,0 +1,33 @@
+# FastAPI Cloud Configuration
+# Deployment settings for FastAPI Cloud platform
+# Docs: https://fastapicloud.com/docs/
+
+app:
+  # Python version (must match pyproject.toml requires-python)
+  python: "3.12"
+
+# Environment variables for production
+# Set secrets in the FastAPI Cloud dashboard under Project Settings → Secrets
+env:
+  PYTHONUNBUFFERED: "1"
+
+# Secrets (not committed to git, must be set in FastAPI Cloud dashboard)
+# - CLAUDE_CODE_OAUTH_TOKEN: Long-lived OAuth token from `claude setup-token`
+# - DATABASE_URL: Neon Postgres connection string (include ?sslmode=require)
+# - EXA_API_KEY: Exa search API key
+# - TAVILY_API_KEY: Tavily search API key
+
+# Health check configuration
+health_check:
+  path: /api/health
+  interval: 30
+  timeout: 10
+
+# Optional: resource limits and scaling
+# resources:
+#   cpu: "0.5"
+#   memory: "512Mi"
+#
+# autoscale:
+#   min_instances: 1
+#   max_instances: 3
