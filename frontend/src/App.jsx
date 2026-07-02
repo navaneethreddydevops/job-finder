@@ -10,6 +10,7 @@ import ResumeOptimizer from './pages/ResumeOptimizer.jsx';
 import Analytics from './pages/Analytics.jsx';
 import Settings from './pages/Settings.jsx';
 import { useState, useEffect } from 'react';
+import { Analytics as VercelAnalytics } from '@vercel/analytics/react';
 
 function RequireAuth({ children }) {
   const { token, loading } = useAuth();
@@ -101,6 +102,7 @@ function App() {
         <BrowserRouter>
           <AppContent />
         </BrowserRouter>
+        <VercelAnalytics />
       </ToastProvider>
     </AuthProvider>
   );
