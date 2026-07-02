@@ -180,8 +180,8 @@ which installs the Python deps **plus Node.js + the Claude Code CLI** (the Agent
 Defined in [`frontend/vercel.json`](frontend/vercel.json) (Vite preset, SPA rewrites).
 
 1. In Vercel, import the repo with **Root Directory = `frontend`**.
-2. Set env var `VITE_API_BASE_URL` to the Render backend origin
-   (e.g. `https://job-finder-api.onrender.com`, no trailing slash). It's baked in at build time.
+2. Set env var `VITE_API_BASE_URL` to the FastAPI Cloud backend origin
+   (e.g. `https://job-finder.fastapicloud.dev`, no trailing slash). It's baked in at build time.
 3. Deploy. The frontend calls the backend cross-origin; CORS is already open on the backend and
    auth uses bearer tokens (no cookies).
 

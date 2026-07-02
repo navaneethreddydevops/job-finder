@@ -7,7 +7,7 @@ let currentToken = null;
 
 /**
  * Base URL of the backend API. Empty in local dev (Vite proxies /api to :8000);
- * set to the Render backend origin (e.g. https://job-finder-api.onrender.com) at
+ * set to the FastAPI Cloud backend origin (e.g. https://job-finder.fastapicloud.dev) at
  * build time via VITE_API_BASE_URL when the frontend is deployed to Vercel.
  */
 export const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
