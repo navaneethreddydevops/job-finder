@@ -9,6 +9,8 @@
 #   DATABASE_URL             Neon Postgres connection string (include ?sslmode=require).
 #                            When unset, the backend falls back to a local SQLite file
 #                            (ephemeral on Render — data resets on each deploy).
+#   EXA_API_KEY              Exa search API key (job discovery). https://dashboard.exa.ai
+#   TAVILY_API_KEY           Tavily search API key (job discovery). https://app.tavily.com
 services:
   - type: web
     name: job-finder-api
@@ -24,6 +26,10 @@ services:
       - key: CLAUDE_CODE_OAUTH_TOKEN
         sync: false
       - key: DATABASE_URL
+        sync: false
+      - key: EXA_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
         sync: false
       - key: PYTHONUNBUFFERED
         value: "1"

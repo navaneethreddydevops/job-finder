@@ -2,7 +2,7 @@
 
 from fastapi import HTTPException, status
 from datetime import datetime, timedelta
-from backend.db import get_db_connection
+from backend.db import get_db_connection, AUTO_PK
 import hashlib
 
 # In-memory rate limit tracking (simple dict-based)
@@ -14,10 +14,10 @@ def init_rate_limit_db():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS rate_limits (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
+            id {AUTO_PK},
+            user_id INTEGER NOT NULL,
             endpoint TEXT NOT NULL,
             request_count INTEGER DEFAULT 1,
             reset_at TEXT NOT NULL,

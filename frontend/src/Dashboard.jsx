@@ -22,6 +22,8 @@ import {
   Clock,
   BarChart3,
   Check,
+  LayoutGrid,
+  List,
 } from 'lucide-react';
 import UserMenu from './components/UserMenu.jsx';
 import { useToast } from './components/Toast.jsx';
@@ -105,6 +107,9 @@ function Dashboard() {
   const [selectedApplied, setSelectedApplied] = useState('All');
 
   // UI state
+  const [viewMode, setViewMode] = useState(
+    () => localStorage.getItem('jf_view_mode') || 'grid'
+  );
   const [currentPage, setCurrentPage] = useState(1);
   const [filterOpen, setFilterOpen] = useState(false);
   const [consoleOpen, setConsoleOpen] = useState(false);
@@ -130,17 +135,26 @@ function Dashboard() {
     selectedLocation, selectedSource, selectedApplied, selectedJob,
   };
 
-  // ── 7-day freshness filter ──────────────────────────────────────────────────
-  const isWithin7d = (job) => {
+  // ── freshness filter ────────────────────────────────────────────────────────
+  // The scouts already constrain every search to the selected window at the source
+  // (LinkedIn f_TPR, Workday "last week", etc.), so a job the agent returned is
+  // in-window by construction. This filter is only a safety net: KEEP by default and
+  // drop a job ONLY when its free-text date_posted positively proves it's older than
+  // the selected window. Do NOT drop jobs whose date is missing/unparseable — that
+  // silently hid every job when the backend flag was absent (posted_within_7d=0,
+  // date_posted=null). Window respects the user's timePeriodDays, not a hardcoded 7.
+  const isWithinWindow = (job) => {
     if (job.posted_within_7d) return true;
     const d = (job.date_posted || '').toLowerCase();
-    if (!d) return false;
+    if (!d) return true; // no date info — trust the agent's server-side window filter
     if (/(just|now|moment|today|yesterday|hour|minute|second)/.test(d)) return true;
     const dayMatch = d.match(/(\d+)\s*day/);
-    if (dayMatch && parseInt(dayMatch[1], 10) <= 7) return true;
+    if (dayMatch) return parseInt(dayMatch[1], 10) <= timePeriodDays;
     const weekMatch = d.match(/(\d+)\s*week/);
-    if (weekMatch && parseInt(weekMatch[1], 10) <= 1) return true;
-    return false;
+    if (weekMatch) return parseInt(weekMatch[1], 10) * 7 <= timePeriodDays;
+    const monthMatch = d.match(/(\d+)\s*month/);
+    if (monthMatch) return parseInt(monthMatch[1], 10) * 30 <= timePeriodDays;
+    return true; // unrecognized format — keep rather than silently drop
   };
 
   // ── data fetching ───────────────────────────────────────────────────────────
@@ -150,7 +164,7 @@ function Dashboard() {
       const resp = await apiFetch('/api/jobs');
       if (resp.ok) {
         const data = await resp.json();
-        const fresh = (data.jobs || []).filter(isWithin7d);
+        const fresh = (data.jobs || []).filter(isWithinWindow);
         setJobs(fresh);
         if (fresh.length > 0) setFilterOpen(true);
         if (showToast) addToast('Database synced', 'success');
@@ -357,6 +371,11 @@ function Dashboard() {
     const interval = setInterval(check, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  // persist the jobs view mode (grid / list)
+  useEffect(() => {
+    localStorage.setItem('jf_view_mode', viewMode);
+  }, [viewMode]);
 
   // status polling while running
   useEffect(() => {
@@ -794,14 +813,14 @@ function Dashboard() {
               <div className="time-period-header">
                 <label htmlFor="time-period-slider" className="control-label">Posted Within</label>
                 <span className="time-period-value">
-                  {timePeriodDays} {timePeriodDays === 1 ? 'day' : 'days'}
+                  {timePeriodDays === 1 ? '24 hrs' : `${timePeriodDays} days`}
                 </span>
               </div>
               <input
                 id="time-period-slider"
                 className="range-slider"
                 type="range"
-                min="7"
+                min="1"
                 max="90"
                 value={timePeriodDays}
                 onChange={(e) => setTimePeriodDays(parseInt(e.target.value, 10))}
@@ -809,6 +828,7 @@ function Dashboard() {
               />
               <div className="time-presets">
                 {[
+                  { days: 1, label: '24 Hours' },
                   { days: 7, label: '1 Week' },
                   { days: 14, label: '2 Weeks' },
                   { days: 30, label: '1 Month' },
@@ -1097,6 +1117,28 @@ function Dashboard() {
                 />
                 <Search size={16} className="text-muted" style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
               </form>
+              <div className="view-toggle" role="group" aria-label="Job view mode" id="view-mode-toggle">
+                <button
+                  type="button"
+                  id="view-mode-grid"
+                  className={`view-toggle-btn ${viewMode === 'grid' ? 'active' : ''}`}
+                  onClick={() => setViewMode('grid')}
+                  aria-pressed={viewMode === 'grid'}
+                  title="Tile view"
+                >
+                  <LayoutGrid size={16} />
+                </button>
+                <button
+                  type="button"
+                  id="view-mode-list"
+                  className={`view-toggle-btn ${viewMode === 'list' ? 'active' : ''}`}
+                  onClick={() => setViewMode('list')}
+                  aria-pressed={viewMode === 'list'}
+                  title="List view"
+                >
+                  <List size={16} />
+                </button>
+              </div>
               <ExportButton format="csv" />
             </div>
           </div>
@@ -1128,7 +1170,7 @@ function Dashboard() {
 
           {/* Job list — skeleton / results / empty state */}
           {jobsLoading ? (
-            <div className="jobs-grid" id="jobs-grid">
+            <div className={`jobs-grid ${viewMode === 'list' ? 'list-view' : ''}`} id="jobs-grid">
               {[1, 2, 3].map(i => (
                 <div key={i} className="job-card skeleton-card">
                   <div className="skeleton skeleton-title" />
@@ -1144,7 +1186,7 @@ function Dashboard() {
             </div>
           ) : filteredJobs.length > 0 ? (
             <>
-              <div className="jobs-grid" id="jobs-grid">
+              <div className={`jobs-grid ${viewMode === 'list' ? 'list-view' : ''}`} id="jobs-grid">
                 {paginatedJobs.map((job, localIdx) => {
                   const absoluteIdx = (currentPage - 1) * JOBS_PER_PAGE + localIdx;
                   return (

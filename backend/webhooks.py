@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, HttpUrl
 import datetime
 import secrets
-from backend.db import get_db_connection
+from backend.db import get_db_connection, AUTO_PK, insert_returning_id
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["webhooks"])
@@ -26,10 +26,10 @@ def init_webhooks_db():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS api_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
+            id {AUTO_PK},
+            user_id INTEGER NOT NULL,
             key TEXT NOT NULL UNIQUE,
             name TEXT NOT NULL,
             rate_limit INTEGER DEFAULT 1000,
@@ -39,20 +39,20 @@ def init_webhooks_db():
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS webhooks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
+            id {AUTO_PK},
+            user_id INTEGER NOT NULL,
             url TEXT NOT NULL,
             events TEXT NOT NULL,
-            is_active BOOLEAN DEFAULT 1,
+            is_active BOOLEAN DEFAULT TRUE,
             created_at TEXT NOT NULL
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS webhook_deliveries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {AUTO_PK},
             webhook_id INTEGER NOT NULL,
             payload TEXT NOT NULL,
             status_code INTEGER,
@@ -299,8 +299,8 @@ async def get_jobs_feed(
 
         # Build query
         query_str = """SELECT id, title, company, location, url, salary_min, salary_max,
-                       source, posted_at, posted_within_24h
-                       FROM jobs WHERE user_id = ? AND posted_within_24h = 1"""
+                       source, posted_at, posted_within_7d
+                       FROM jobs WHERE user_id = ? AND posted_within_7d = 1"""
         params = [user_id]
 
         if query:
@@ -329,7 +329,7 @@ async def get_jobs_feed(
                 "salary_max": row[6],
                 "source": row[7],
                 "posted_at": row[8],
-                "posted_within_24h": row[9],
+                "posted_within_7d": row[9],
             }
             for row in jobs
         ]

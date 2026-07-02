@@ -291,7 +291,7 @@ async def _optimize_with_claude(job_description: str, resume_text: str) -> tuple
         "JSON as your final message."
     )
     options = ClaudeAgentOptions(
-        model=None,
+        model="claude-sonnet-5",
         cwd=REPO_ROOT,                       # so the SDK discovers .claude/skills/
         setting_sources=["project"],         # load project skills (the bundled docx skill)
         skills=["docx"],                     # enable the docx skill (adds the Skill tool)

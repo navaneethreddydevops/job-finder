@@ -80,12 +80,12 @@ async def export_comparison(data: dict, user: dict = Depends(get_current_user)):
 
         if format_type == "csv":
             # Create CSV content
-            lines = ["Job Title,Company,Location,Salary Min,Salary Max,Source,C2C Status"]
+            lines = ["Job Title,Company,Location,Salary Min,Salary Max,Source"]
             for job in jobs:
                 lines.append(
                     f'{job.get("title")},{job.get("company")},{job.get("location")},'
                     f'{job.get("salary_min")},{job.get("salary_max")},'
-                    f'{job.get("source")},{job.get("c2c_viability")}'
+                    f'{job.get("source")}'
                 )
             content = "\n".join(lines)
             filename = "job_comparison.csv"

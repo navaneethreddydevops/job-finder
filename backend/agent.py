@@ -106,7 +106,7 @@ class JobItem(BaseModel):
         description="Date posted or found, e.g. '2 hours ago', 'today', '3 days ago'"
     )
     posted_within_7d: bool = Field(
-        description="True ONLY if the job was posted within the last 7 days (on or after 7 days before the run date). Set False for anything older or if the posting date is unknown."
+        description="Whether the job is within the search window. You already searched each source with a last-N-days filter, so default to True. Set False ONLY when the posting date is clearly OLDER than the window. If the exact date is unknown but the source's freshness filter was applied, keep True — do not set False just because a date couldn't be parsed."
     )
     key_requirements: list[str] = Field(
         description="List of key requirements/skills mentioned"
@@ -222,7 +222,7 @@ async def run_job_finder_agent(
             batches as they are found instead of waiting for the whole run to complete.
         job_types: List of job types to search for. Supported values: "fulltime", "remote", "contract".
             Defaults to ["fulltime", "remote"].
-        time_period_days: Number of days to search back. Range: 7-90. Defaults to 7.
+        time_period_days: Number of days to search back. Range: 1-90 (1 = last 24 hrs). Defaults to 7.
     """
 
     from datetime import datetime, timezone, timedelta
@@ -230,8 +230,8 @@ async def run_job_finder_agent(
     if job_types is None:
         job_types = ["fulltime", "remote"]
 
-    # Clamp time_period_days to 7-90 range
-    time_period_days = max(7, min(90, time_period_days))
+    # Clamp time_period_days to 1-90 range (1 = last 24 hours)
+    time_period_days = max(1, min(90, time_period_days))
 
     now = datetime.now(timezone.utc)
     run_date = now.strftime("%Y-%m-%d")
@@ -268,7 +268,7 @@ async def run_job_finder_agent(
             "key_requirements, contact_email, contact_phone, source, description.\n"
             "Return ONLY JSON array — no commentary."
         ),
-        model="claude-haiku-4-5-20251001",
+        model="claude-sonnet-5",
         tools=SCOUT_ALLOWED_TOOLS,
     )
 
@@ -289,7 +289,7 @@ async def run_job_finder_agent(
     options = ClaudeAgentOptions(
         session_id=effective_session_id if not is_resume else None,
         resume=effective_session_id if is_resume else None,
-        model="claude-haiku-4-5-20251001",
+        model="claude-sonnet-5",
         agents={"job_scout": job_scout},
         allowed_tools=AGENT_ALLOWED_TOOLS,
         mcp_servers={JOB_SEARCH_SERVER_NAME: job_search_server},
@@ -336,6 +336,23 @@ async def run_job_finder_agent(
         # Track the tool_use_id of each `Task` (job_scout) call so we can recognise its
         # result when it streams back and persist that scout's jobs immediately.
         scout_task_ids: set[str] = set()
+        # Safety net: accumulate every job parsed from a scout result, de-duped by URL
+        # (then title|company). If the orchestrator's final message yields no parseable
+        # job list, we still return everything the scouts found so it gets saved — the
+        # symptom this guards against is "console showed jobs found but the DB stayed empty".
+        collected_jobs: list[dict] = []
+        seen_job_keys: set[str] = set()
+
+        def _remember(jobs_batch):
+            for j in jobs_batch:
+                if not isinstance(j, dict):
+                    continue
+                key = (j.get("url") or "").strip() or (
+                    f"{j.get('title', '')}|{j.get('company', '')}|{j.get('location', '')}"
+                )
+                if key and key not in seen_job_keys:
+                    seen_job_keys.add(key)
+                    collected_jobs.append(j)
         # Process the response stream manually to extract tool execution logs and thinking
         async for msg in client.receive_response():
             # If it's an assistant message, we can get thought process and tool execution
@@ -373,6 +390,8 @@ async def run_job_finder_agent(
                         batch = _extract_jobs_from_text(
                             _tool_result_text(block.content)
                         )
+                        if batch:
+                            _remember(batch)
                         if batch and batch_callback:
                             try:
                                 await batch_callback(batch)
@@ -391,22 +410,30 @@ async def run_job_finder_agent(
                 elif msg.structured_output:
                     data = msg.structured_output
                 elif msg.result:
-                    # Fallback to parse json directly
-                    try:
-                        # First try to find markdown json block
-                        match = re.search(
-                            r"```json\s*(\{.*?\})\s*```",
-                            msg.result,
-                            re.DOTALL | re.IGNORECASE,
+                    # Parse the final merged list from the orchestrator's prose. Use the
+                    # tolerant shared extractor (handles ```json fences, bare arrays,
+                    # {"jobs": [...]} wrappers, and JSON embedded in prose) rather than a
+                    # narrow regex — the old regex only matched a fenced object and returned
+                    # None for a bare array or unfenced JSON, silently dropping the whole run.
+                    jobs = _extract_jobs_from_text(msg.result)
+                    if jobs:
+                        data = {"jobs": jobs}
+                    elif log_callback:
+                        await log_callback(
+                            "\n[Agent] Could not parse a job list from the final result; "
+                            "falling back to jobs collected from scout batches.\n"
                         )
-                        if not match:
-                            # Fallback to finding just the outer brackets
-                            match = re.search(r"(\{.*\})", msg.result, re.DOTALL)
-                        if match:
-                            data = json.loads(match.group(1))
-                    except Exception as e:
-                        print("Failed to parse JSON fallback:", e)
                 break
+
+        # Safety net: if the orchestrator's final message produced no parseable job list,
+        # save everything the scouts returned during the run so a run that clearly found
+        # jobs never ends up persisting nothing.
+        if (not data or not (data.get("jobs") if isinstance(data, dict) else None)) and collected_jobs:
+            data = {"jobs": collected_jobs}
+            if log_callback:
+                await log_callback(
+                    f"\n[Agent] Using {len(collected_jobs)} jobs collected from scout results.\n"
+                )
 
         if log_callback:
             await log_callback("\n[Agent] Search complete. Parsing results...\n")

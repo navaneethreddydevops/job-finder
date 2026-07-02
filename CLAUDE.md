@@ -4,11 +4,13 @@ Guidance for Claude Code (and other AI agents) working in this repository.
 
 ## What this is
 
-A full-stack **Job Finder**. An autonomous agent built on the **Claude Agent SDK** crawls
-six job boards (LinkedIn, Dice, Monster, Indeed, Glassdoor, ZipRecruiter) for recently-posted jobs
-matching a user-provided search query, extracts them as structured JSON, and stores them
-in SQLite. A **FastAPI** backend exposes the agent + data over REST/SSE, and a **Vite + React**
-dashboard renders the results with live agent-thought streaming.
+A full-stack **Job Finder**. An autonomous agent built on the **Claude Agent SDK** researches
+two sources — **LinkedIn (`linkedin.com/jobs`) and Workday-hosted company careers portals
+(`*.myworkdayjobs.com`)** — for **remote, full-time** jobs posted in the **last 7 days**, using
+parallel `job_scout` subagents. It always searches a fixed set of Principal-level platform/infra
+roles (DevOps, Cloud, Kubernetes, SRE), plus any extra role the user types. Results are extracted as
+structured JSON and stored in SQLite. A **FastAPI** backend exposes the agent + data over REST/SSE,
+and a **Vite + React** dashboard renders the results with live agent-thought streaming.
 
 ```
 job-finder/
@@ -17,9 +19,8 @@ job-finder/
 │   ├── auth.py         # Auth router: users/sessions, login/register/profile/password
 │   ├── resume.py       # Resume optimizer router: docx parse/generate + Claude call
 │   ├── main.py         # FastAPI app: /api/pull, /api/jobs, /api/stream (SSE), etc.
-│   ├── db.py           # SQLite persistence (jobs.db) + de-duplication
-│   ├── diag.py         # Standalone smoke-test harness for the backend
-│   └── jobs.db         # SQLite database (jobs, users, resume_jobs)
+│   ├── db.py           # Persistence (Neon Postgres via DATABASE_URL; SQLite test fallback) + de-duplication
+│   └── diag.py         # Standalone smoke-test harness for the backend
 ├── frontend/
 │   └── src/
 │       ├── App.jsx         # Router root (BrowserRouter + protected routes)
@@ -81,55 +82,104 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
 `run_job_finder_agent(query)` in `backend/agent.py` configures a `ClaudeSDKClient` as an
 **orchestrator** plus a `job_scout` **subagent**:
 
-- The orchestrator accepts a dynamic search query from the user (e.g. "Data Engineer", "Senior Python Developer")
-  and fans the search out by spawning one `job_scout` per source via the built-in **Task tool** —
-  LinkedIn, Dice, Monster, Indeed, Glassdoor, and ZipRecruiter — running them in parallel, then merges and de-duplicates
-  the results.
+- The orchestrator always searches a fixed set of `DEFAULT_ROLES` (Principal DevOps / Cloud /
+  Kubernetes / Site Reliability Engineer) and appends any non-empty user query as an extra role. It
+  fans the research out by spawning one `job_scout` **per role × source** via the built-in **Task
+  tool** — **LinkedIn (`linkedin.com/jobs`) and Workday careers portals (`*.myworkdayjobs.com`) only**
+  (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter) — running them in parallel, then merges and
+  de-duplicates the results.
 - **Tools granted to both agents** (`AGENT_ALLOWED_TOOLS` and `SCOUT_ALLOWED_TOOLS`):
   - **File operations**: `Read`, `Write`, `Edit` — for processing and storing job data
   - **System operations**: `Bash`, `Glob`, `Grep` — for data processing and filtering
-  - **Web operations**: `WebSearch`, `WebFetch` — for discovering and reading job listings
+  - **Job search APIs**: `mcp__jobsearch__exa_search`, `mcp__jobsearch__tavily_search` — the
+    primary job-discovery tools (Exa + Tavily), via an in-process SDK MCP server (`backend/search_tools.py`)
+  - **Web operations**: `WebSearch`, `WebFetch` — fallback search + reading individual listings
   - **Agent control**: `Task` (orchestrator only), `TodoWrite` — for orchestration and planning
-  - There is **no MCP integration**.
-- `model=None` (inherits whatever model the `claude` CLI is configured with);
-  `max_turns=80`; `permission_mode="bypassPermissions"`.
-- **Structured output** is enforced via `output_format=JobList.model_json_schema()`;
-  the stream is also parsed for a ```json fenced block as a fallback.
+  - The only MCP integration is the in-process `jobsearch` server (Exa + Tavily). No external MCP servers.
+- `model="claude-sonnet-5"` for both the orchestrator and the `job_scout` subagent (the resume
+  optimizer in `resume.py` uses the same model). Sonnet is chosen for stronger structured-output
+  parsing and smarter tool use; `permission_mode="bypassPermissions"`.
+- **Structured output** is enforced via `output_format=JobList.model_json_schema()`. If
+  `msg.structured_output` is absent, the final `msg.result` is parsed with the tolerant
+  `_extract_jobs_from_text` helper (handles ```json fences, **bare/unfenced arrays**,
+  `{"jobs": [...]}` wrappers, and JSON embedded in prose) — do **not** narrow this back to a
+  single fenced-object regex, which silently dropped whole runs that returned a bare array.
+  As a final safety net, every job parsed from a scout result is accumulated (de-duped by URL);
+  if the orchestrator's final message yields no parseable list, those collected jobs are returned
+  and saved, so a run that visibly found jobs never persists nothing.
+- **Remote, full-time only**: The agent keeps only remote full-time (FTE) roles and excludes
+  non-remote, contract, temporary, internship, and part-time roles.
 
-### Pull as many fresh jobs as possible
+### Always-searched roles + two sources only — LinkedIn, Workday
+The agent always researches `DEFAULT_ROLES` in `agent.py` (Principal DevOps / Cloud / Kubernetes /
+Site Reliability Engineer); a non-empty user query is added as an extra role. Sources are fixed to
+`SEARCH_SOURCES = ["LinkedIn", "Workday"]` — **LinkedIn (`linkedin.com/jobs`) and Workday careers
+portals (`*.myworkdayjobs.com`)**. Do not reintroduce Glassdoor, Dice, Monster, Indeed, ZipRecruiter,
+or any other board. The source list and role list are intentionally fixed in `agent.py`'s scout
+prompt, system prompt, and run prompt. The `source` field is one of `'Workday'` or `'LinkedIn'`.
+
+### Pull as many fresh roles as possible
 There is **no upper limit** on job count — more is better. Do not reintroduce a fixed
-target (the old "aim for 20–30" cap was removed).
+target (the old "aim for 20–30" cap was removed). The orchestrator fans out one subagent per
+role × source for broad coverage.
 
-### 24-hour freshness is a hard requirement
-Only jobs **posted within the last 24 hours / on the run date** should be collected and
-shown. This is enforced at every layer, so keep them in sync if you touch one:
-1. **Agent** (`agent.py`): the run date is injected into the prompts; scouts use each
-   board's last-24h filter (e.g. LinkedIn `f_TPR=r86400`, Indeed `fromage=1`) and set
-   the `posted_within_24h` boolean on every job.
-2. **DB** (`db.py`): `posted_within_24h` column (with an `ALTER TABLE` migration for
-   older databases), persisted by `save_job`, returned as a bool by `get_all_jobs`.
-3. **Frontend** (`App.jsx`): `fetchJobs` filters to `isWithin24h(job)` — trusts the
-   backend flag first, with a free-text `date_posted` fallback.
+### Remote + full-time + 7-day freshness is a hard requirement
+Only **remote, full-time jobs posted within the last 7 days** should be collected and shown. This is
+enforced at every layer, so keep them in sync if you touch one:
+1. **Agent** (`agent.py`): the run date and a 7-day `since_date` are injected into the prompts;
+   scouts verify the role is remote + full-time and use each source's last-7-days filter (e.g. LinkedIn
+   `f_TPR=r604800` + remote `f_WT=2`, Workday 'posted in the last week'), then set the
+   `posted_within_7d` boolean on every job.
+2. **DB** (`db.py`): `posted_within_7d` column (with a `RENAME COLUMN` migration from the legacy
+   `posted_within_24h`), persisted by `save_job`, returned as a bool by `get_user_jobs`.
+3. **Frontend** (`Dashboard.jsx`): `fetchJobs` filters to `isWithinWindow(job)` — trusts the
+   backend `posted_within_7d` flag first, then a free-text `date_posted` fallback measured against
+   the selected `timePeriodDays` (not a hardcoded 7). **Keeps by default**: a job with a missing or
+   unparseable `date_posted` is retained (the scouts already constrained the search window at the
+   source), and is dropped only when its date positively proves it's older than the window. Do not
+   revert this to a drop-by-default filter — that silently hid every job when the backend flag was
+   absent (`posted_within_7d=0`, `date_posted=NULL`).
 
-## Web tooling (built-in, no MCP)
+## Search tooling — Exa + Tavily (`backend/search_tools.py`)
 
-The agent uses Claude's built-in web tools directly — no MCP servers are configured.
+Job discovery is done via the **Exa** and **Tavily** search APIs, exposed to the agent as
+**in-process SDK MCP tools** (`create_sdk_mcp_server` → server name `jobsearch`):
 
-- `WebSearch` — targeted web queries using the user's search term (e.g. `<query> site:linkedin.com`) with each
-  board's last-24h recency filter.
-- `WebFetch` — opens and reads individual listings to verify dates and extract fields.
+- `mcp__jobsearch__exa_search(query, source)` and `mcp__jobsearch__tavily_search(query, source)` —
+  each scopes results to the assigned source's domain (`linkedin.com` or `myworkdayjobs.com`),
+  enforces the last-7-days window, and returns a compact JSON list of candidate postings
+  (`title, url, published_date, snippet`). These are the **primary** discovery tools and the reason
+  recall is high (the built-in `WebSearch` alone returned too few results).
+- **Keys**: read from env `EXA_API_KEY` / `TAVILY_API_KEY` (never hardcoded; in `.env` locally,
+  Render secrets in prod). If a key is missing, the tool returns a clear message and the agent
+  falls back to `WebSearch`.
+- `WebSearch` — fallback web search when a search API key is unavailable.
+- `WebFetch` — opens and reads individual listings to verify dates, that the role is remote + full-time, and extract fields.
+
+Do not reintroduce other boards into `search_tools.py`'s domain map — only `linkedin.com` and
+`myworkdayjobs.com` are allowed.
 
 ## Persistence (`backend/db.py` — dual backend: SQLite local, Postgres/Neon prod)
 
-- **`db.py` supports two backends transparently.** Default is SQLite (`jobs.db`) for local
-  dev and tests. When `DATABASE_URL` is a `postgres://`/`postgresql://` string (e.g. Neon on
-  Render), it switches to Postgres via `psycopg`. The exported `IS_POSTGRES`, `AUTO_PK`,
+- **`db.py` supports two backends transparently.** The primary database is **Neon Postgres**,
+  selected when `DATABASE_URL` is a `postgres://`/`postgresql://` string (set in `.env` locally
+  and as a Render secret in prod) via `psycopg`. Without `DATABASE_URL` it falls back to a local
+  SQLite file (`backend/jobs.db`) — kept **only for tests/`diag.py`**; the file is git-ignored,
+  not part of the repo, and gets auto-created empty if the app boots without `DATABASE_URL`
+  (if the dashboard ever shows zero jobs unexpectedly, check that `.env` is being loaded). The exported `IS_POSTGRES`, `AUTO_PK`,
   `BLOB_TYPE` constants and `insert_returning_id()` helper absorb the dialect differences, and a
-  thin connection wrapper translates `?` placeholders to `%s` so the rest of the code stays
-  backend-agnostic. **Keep new SQL `?`-style and route inserts-needing-an-id through
-  `insert_returning_id`** — do not hardcode `lastrowid`, `AUTOINCREMENT`, `PRAGMA`, or `BLOB`.
-  `auth.py` and `resume.py` follow this (DDL uses `AUTO_PK`/`BLOB_TYPE`; migrations branch on
-  `IS_POSTGRES`). Tables auto-create on boot, so a fresh Neon DB needs no manual migration.
+  thin connection wrapper translates `?` placeholders to `%s` (escaping literal `%`, so
+  `LIKE '%…%'` is safe) and returns rows that support **both** dict-style (`row["col"]`) and
+  positional (`row[0]`, tuple-unpacking) access, matching `sqlite3.Row`. **Keep new SQL
+  `?`-style and route inserts-needing-an-id through `insert_returning_id`** — do not hardcode
+  `lastrowid`, `AUTOINCREMENT`, `PRAGMA`, `BLOB`, SQLite date functions (`datetime('now', …)` —
+  compute cutoffs in Python and pass as params), `BOOLEAN DEFAULT 1` (use `TRUE`), or
+  `INSERT OR REPLACE` (use `ON CONFLICT(…) DO UPDATE`, portable to both). All router modules
+  follow this (DDL uses `AUTO_PK`/`BLOB_TYPE`; migrations branch on `IS_POSTGRES`). Postgres
+  also enforces FK targets at `CREATE TABLE` time (SQLite doesn't): the shared `users` DDL
+  lives in `db.ensure_users_table()` (called by both `init_db` and `auth.init_auth_db`), and
+  modules that self-init at import with FKs to `jobs`/`applications` call `init_db()` first.
+  Tables auto-create on boot, so a fresh Neon DB needs no manual migration.
 - De-duplication keys on the posting **URL**; when a job has no URL, a stable key is
   synthesized from `title|company|location` so URL-less jobs don't collide on the
   `UNIQUE(url)` constraint and collapse into one row.
@@ -146,17 +196,23 @@ The agent uses Claude's built-in web tools directly — no MCP servers are confi
 - `GET /api/jobs` — all stored jobs.
 - `GET /api/stream` — SSE stream of agent thoughts/tool calls/backend logs. On a DB
   write the backend emits a `Database now holds …` line that the UI uses to refresh.
+  The current run's lines are also buffered in an in-memory `log_history` (bounded by
+  `LOG_HISTORY_MAX`, cleared at the start of each `/api/pull`); a client that connects
+  mid-run — e.g. after a browser refresh — is replayed that buffer before live streaming,
+  so refreshing never loses the in-flight agent console. The frontend's mount effect polls
+  `/api/status`, and if a run is active it reconnects and lets the replay repopulate `logs`.
 - `GET /api/status`, `GET /api/health`, `PATCH /api/jobs/{id}/apply`, `POST /api/jobs/clear`.
 
 ## Agent tools (Task 1)
 
 `backend/agent.py` declares `AGENT_ALLOWED_TOOLS` and passes it to
-`ClaudeAgentOptions(allowed_tools=...)`. It grants the full built-in toolset from the
+`ClaudeAgentOptions(allowed_tools=...)` along with `mcp_servers={"jobsearch": job_search_server}`.
+It grants the built-in toolset from the
 [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) — `Read`,
-`Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite`.
-There is **no MCP integration**; the agent relies solely on the built-in `WebSearch` and
-`WebFetch` web tools. The `job_scout` subagent keeps its narrower toolset (`WebSearch`,
-`WebFetch`).
+`Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite` — **plus**
+the Exa/Tavily search tools (`mcp__jobsearch__exa_search`, `mcp__jobsearch__tavily_search`) from the
+in-process `jobsearch` SDK MCP server. The `job_scout` subagent gets the same search tools plus
+`WebSearch`/`WebFetch` (its `AgentDefinition.tools` = `SCOUT_ALLOWED_TOOLS`).
 
 ## Authentication (`backend/auth.py`)
 

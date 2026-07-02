@@ -863,6 +863,71 @@ body {
   gap: 1rem;
 }
 
+/* View toggle (tile / list) */
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.view-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.45rem 0.6rem;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--transition-normal), color var(--transition-normal);
+}
+
+.view-toggle-btn + .view-toggle-btn {
+  border-left: 1px solid var(--border);
+}
+
+.view-toggle-btn:hover {
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+}
+
+.view-toggle-btn.active {
+  color: var(--primary);
+  background: var(--primary-glow);
+}
+
+/* List view — compact single-column rows */
+.jobs-grid.list-view {
+  grid-template-columns: 1fr;
+  gap: 0.55rem;
+}
+
+.jobs-grid.list-view .job-card {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+  padding: 0.8rem 1.15rem;
+}
+
+.jobs-grid.list-view .job-card-header {
+  flex: 1 1 260px;
+  min-width: 0;
+  align-items: center;
+}
+
+.jobs-grid.list-view .job-meta-row {
+  flex: 0 0 auto;
+}
+
+.jobs-grid.list-view .job-desc-preview,
+.jobs-grid.list-view .job-requirements {
+  display: none;
+}
+
 /* Job Card */
 .job-card {
   background: var(--bg-card);
