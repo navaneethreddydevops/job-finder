@@ -233,3 +233,4 @@ docker-compose.override.yml
 # Local SQLite database (dev fallback only — prod uses Neon Postgres via DATABASE_URL)
 backend/jobs.db
 backend/consolidated_jobs.json
+.logfire/

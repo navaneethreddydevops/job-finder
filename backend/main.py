@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import logfire
 import sys
 
 sys.path.append(os.path.dirname(__file__))
@@ -39,6 +40,23 @@ app = FastAPI(
         "to `/api/token` and attaches the returned token to every request."
     ),
 )
+
+# Observability — Pydantic Logfire. Sends only when credentials exist: the local
+# .logfire/ credentials file (from `logfire auth` + `logfire projects use`) or a
+# LOGFIRE_TOKEN env var/secret in prod. Without either, telemetry is a no-op so
+# the app still boots (tests, fresh clones, CI).
+logfire.configure(
+    service_name="job-finder-backend",
+    send_to_logfire="if-token-present" if not os.path.exists(
+        os.path.join(os.path.dirname(__file__), "..", ".logfire", "logfire_credentials.json")
+    ) else True,
+)
+logfire.instrument_fastapi(app, capture_headers=False)
+logfire.instrument_system_metrics()
+# Traces any direct anthropic-client calls. Note: the job agent + resume optimizer
+# go through the Claude Agent SDK (spawned `claude` CLI subprocess), which this
+# does NOT capture — only in-process `anthropic.Anthropic()` usage.
+logfire.instrument_anthropic()
 
 # Core routers (job search, auth, resume)
 app.include_router(auth_router)

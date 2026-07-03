@@ -10,6 +10,7 @@ restores the progress bar and result.
 
 import io
 import json
+import logfire
 import os
 import re
 import tempfile
@@ -251,6 +252,17 @@ def sanitize_content(content: dict) -> dict:
 
 
 async def _optimize_with_claude(job_description: str, resume_text: str) -> tuple[dict, bytes | None]:
+    """Logfire-traced wrapper: the Agent SDK spawns the `claude` CLI subprocess, so
+    `instrument_anthropic()` can't see this call — trace it with a manual span."""
+    with logfire.span(
+        "resume_optimize claude run",
+        job_description_chars=len(job_description),
+        resume_chars=len(resume_text),
+    ):
+        return await _optimize_with_claude_impl(job_description, resume_text)
+
+
+async def _optimize_with_claude_impl(job_description: str, resume_text: str) -> tuple[dict, bytes | None]:
     """Optimize the resume with Claude via the Agent SDK.
 
     The bundled **docx skill** (`.claude/skills/docx/`) is enabled on the SDK options so the
@@ -313,6 +325,14 @@ async def _optimize_with_claude(job_description: str, resume_text: str) -> tuple
                         if isinstance(block, TextBlock):
                             result_text += block.text
                 elif isinstance(msg, ResultMessage):
+                    logfire.info(
+                        "resume optimize result",
+                        is_error=msg.is_error,
+                        num_turns=getattr(msg, "num_turns", None),
+                        duration_ms=getattr(msg, "duration_ms", None),
+                        total_cost_usd=getattr(msg, "total_cost_usd", None),
+                        usage=getattr(msg, "usage", None),
+                    )
                     if msg.is_error:
                         raise RuntimeError(msg.errors or msg.result or "Claude returned an error")
                     if msg.structured_output:
