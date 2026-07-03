@@ -28,7 +28,17 @@ init_db()
 init_auth_db()
 init_resume_db()
 
-app = FastAPI(title="Job Finder Backend")
+app = FastAPI(
+    title="Job Finder Backend",
+    description=(
+        "Autonomous job-finder agent + REST/SSE API.\n\n"
+        "**Authentication:** most endpoints require a bearer token. Click the "
+        "**Authorize** button and sign in with the seeded test account — "
+        "`username: test@test.com`, `password: testtest` — to exercise the "
+        "protected endpoints directly from this page. The Authorize dialog posts "
+        "to `/api/token` and attaches the returned token to every request."
+    ),
+)
 
 # Core routers (job search, auth, resume)
 app.include_router(auth_router)

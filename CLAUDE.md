@@ -234,10 +234,17 @@ in-process `jobsearch` SDK MCP server. The `job_scout` subagent gets the same se
 Email/password auth backed by the same SQLite DB. Username **is** the email; passwords are
 **≥ 8 chars**, hashed with stdlib `pbkdf2_hmac` (no external crypto deps). Bearer tokens
 live in `auth_sessions`. A test user `test@test.com` / `testtest` is seeded on startup.
-Endpoints (all under `/api`): `register`, `login`, `logout`, `me`, `profile` (PATCH),
-`change-password`. Protected routes depend on `get_current_user`. The frontend stores
-`{token, user}` in `localStorage` (`jf_auth`) via `auth.jsx` and attaches the bearer header
-through the `apiFetch` helper; React Router guards `/`, `/profile`, `/resume/optimizer`.
+Endpoints (all under `/api`): `register`, `login`, `token`, `logout`, `me`, `profile` (PATCH),
+`change-password`. Protected routes depend on `get_current_user`, which uses an
+`OAuth2PasswordBearer` scheme (`tokenUrl=api/token`, `auto_error=False`) so **Swagger `/docs`
+renders an Authorize button** — sign in there with the seeded `test@test.com` / `testtest`
+account to exercise protected endpoints. `get_current_user` prefers the OAuth2-extracted token
+but falls back to the raw `Authorization: Bearer` header, so the frontend's `apiFetch` is
+unaffected. `/api/token` is an OAuth2 password-form endpoint (username = email) returning the
+same bearer token as `/api/login`; the FastAPI app `description` surfaces the test credentials
+at the top of `/docs`. The frontend stores `{token, user}` in `localStorage` (`jf_auth`) via
+`auth.jsx` and attaches the bearer header through the `apiFetch` helper; React Router guards
+`/`, `/profile`, `/resume/optimizer`.
 
 ## Resume Optimizer (`backend/resume.py`)
 

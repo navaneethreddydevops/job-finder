@@ -14,7 +14,7 @@ A full-stack, Claude-powered dashboard that researches LinkedIn and the Workday,
 * **Exa + Tavily search**: Scouts discover listings via the Exa and Tavily search APIs (in-process SDK MCP tools `exa_search` / `tavily_search`, keys from `EXA_API_KEY` / `TAVILY_API_KEY`), read them with `WebFetch`, and fall back to the built-in `WebSearch` if a key is missing.
 * **Live thought console**: Streams agent reasoning and tool calls to the browser over Server-Sent Events.
 * **Notion-inspired React Dashboard**: A clean, editorial light UI (serif display headings, hairline borders, soft shadows, Notion-style tag colors) with statistics, search, multi-selection filters (Remote vs Onsite, Job Sources, Applied), and a details drawer. See the redesign spec in [app_spec.md](app_spec.md) (Task 4).
-* **Authentication**: Email/password login & registration (8+ char passwords), profile editing, and password change. Seeded test user `test@test.com` / `testtest`.
+* **Authentication**: Email/password login & registration (8+ char passwords), profile editing, and password change. Seeded test user `test@test.com` / `testtest`. Protected endpoints use an OAuth2 bearer scheme, so the interactive Swagger docs at `/docs` have an **Authorize** button — sign in with the test credentials to try them out.
 * **Resume Optimizer** (`/resume/optimizer`): Split-pane tool — paste a job description, drop in your existing Word resume (previewed in-browser), and Claude generates a tailored, downloadable `.docx`. Includes a progress bar and refresh-safe persisted state.
 * **Unified Server**: Serves the static production React build directly from the Python backend (with SPA fallback for client-side routes).
 

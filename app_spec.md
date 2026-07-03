@@ -82,12 +82,22 @@ No external crypto deps — uses stdlib `hashlib.pbkdf2_hmac` + `secrets` + `hma
 | ------ | ----------------------- | ---- | ------------- |
 | POST   | `/api/register`         | no   | `{email, password, full_name?, phone?}` → `{token, user}` |
 | POST   | `/api/login`            | no   | `{email, password}` → `{token, user}` |
+| POST   | `/api/token`            | no   | OAuth2 password form (`username`=email, `password`) → `{access_token, token_type}` — powers Swagger's **Authorize** button |
 | POST   | `/api/logout`           | yes  | invalidates the token |
 | GET    | `/api/me`               | yes  | `{user}` |
 | PATCH  | `/api/profile`          | yes  | `{full_name?, phone?, email?}` → `{user}` |
 | POST   | `/api/change-password`  | yes  | `{current_password, new_password}` → `{success}` |
 
 Validation: email must look like an email; password `len >= 8`. Errors return 400/401.
+
+### Swagger / OpenAPI docs auth
+Protected routes declare an `OAuth2PasswordBearer` security scheme (`tokenUrl=api/token`),
+so `/docs` renders an **Authorize** button and a username/password form. Sign in there with
+the seeded test account (`test@test.com` / `testtest`) to call protected endpoints from the
+docs page. The scheme is wired with `auto_error=False`; `get_current_user` prefers the token
+it extracts but still falls back to parsing a raw `Authorization: Bearer <token>` header, so
+the frontend's existing `apiFetch` calls are unaffected. The FastAPI app `description` also
+spells out the test credentials so they're visible at the top of `/docs`.
 
 ### Frontend
 - React Router routes: `/login`, `/register`, `/profile`.
