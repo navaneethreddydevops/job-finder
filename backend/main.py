@@ -47,6 +47,10 @@ app.add_middleware(
 agent_status = {"status": "idle", "query": None, "session_id": None}
 log_queues = []
 LOG_HISTORY_MAX = 1500
+# Per-client SSE queue bound. A healthy client drains far faster than the agent
+# emits, so this only bites when a connection has stalled — where the oldest
+# lines are dropped for that client instead of buffering the whole run in RAM.
+LOG_QUEUE_MAX = LOG_HISTORY_MAX
 # In-memory buffer of the current run's log lines so a client that reconnects
 # (e.g. after a browser refresh) can replay what was already emitted. Bounded to
 # cap memory; the run itself is in-memory, so surviving a browser refresh — not a
@@ -55,8 +59,8 @@ log_history: deque = deque(maxlen=LOG_HISTORY_MAX)
 
 
 class PullRequest(BaseModel):
-    # Optional: the agent always searches the default Principal roles; a non-empty
-    # query is added as an extra role on top of those defaults.
+    # The Search Target role from Agent Controls — the ONLY role searched. If empty,
+    # the agent falls back to the default Principal roles in agent.py.
     query: str = ""
     # Job type filters: which types of jobs to search for
     job_types: list[str] = ["fulltime", "remote"]
@@ -72,7 +76,15 @@ async def publish_log(msg: str):
     log_history.append(msg)
     for q in list(log_queues):
         try:
-            await q.put(msg)
+            q.put_nowait(msg)
+        except asyncio.QueueFull:
+            # Stalled client: evict its oldest line to make room, never block
+            # the agent run on a slow consumer.
+            try:
+                q.get_nowait()
+                q.put_nowait(msg)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -337,7 +349,7 @@ async def stream_logs():
     """Server-Sent Events (SSE) endpoint to stream agent thought logs in real time."""
 
     async def event_generator():
-        q = asyncio.Queue()
+        q = asyncio.Queue(maxsize=LOG_QUEUE_MAX)
         # Snapshot history and register the live queue with NO await between them:
         # both are synchronous, so in single-threaded asyncio no other coroutine can
         # publish in the gap — the replay contains no lost or duplicated lines.
@@ -351,7 +363,15 @@ async def stream_logs():
             for msg in history_snapshot:
                 yield f"data: {json.dumps({'message': msg})}\n\n"
             while True:
-                msg = await q.get()
+                # Wait for the next log line, but never sit silent for long: proxies and
+                # load balancers idle-close quiet connections, which showed up as the UI
+                # "disconnecting" mid-run. An SSE comment line (": keep-alive") is ignored
+                # by EventSource but keeps the connection alive through intermediaries.
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
                 yield f"data: {json.dumps({'message': msg})}\n\n"
         except asyncio.CancelledError:
             pass

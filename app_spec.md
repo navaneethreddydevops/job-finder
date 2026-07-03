@@ -14,9 +14,9 @@ The job-finder orchestrator (`backend/agent.py`) researches **remote, full-time*
 five sources: **LinkedIn (`linkedin.com/jobs`) and the ATS-hosted careers portals Workday
 (`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever
 (`jobs.lever.co`), and Ashby (`jobs.ashbyhq.com`)** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter —
-aggregator boards are banned). It always searches a fixed
-set of Principal-level roles (`DEFAULT_ROLES`: DevOps, Cloud, Kubernetes, SRE) plus any extra typed
-query, keeping only postings from the **last 7 days**; the orchestrator runs the searches itself and
+aggregator boards are banned). It searches the user's typed
+query as the only role (`DEFAULT_ROLES` — Principal DevOps, Cloud, Kubernetes, SRE — are a fallback
+used only when the query is empty), keeping only postings from the **last 7 days**; the orchestrator runs the searches itself and
 hands batches of candidates to parallel `job_scout` subagents for verification and formatting. The agent is granted the **full built-in toolset** (no MCP integration), with behavior
 intentional and documented.
 

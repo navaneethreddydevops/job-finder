@@ -6,10 +6,14 @@ import Dashboard from './Dashboard.jsx';
 import Login from './pages/Login.jsx';
 import Register from './pages/Register.jsx';
 import Profile from './pages/Profile.jsx';
-import ResumeOptimizer from './pages/ResumeOptimizer.jsx';
-import Analytics from './pages/Analytics.jsx';
-import Settings from './pages/Settings.jsx';
-import { useState, useEffect } from 'react';
+import { lazy, Suspense, useState, useEffect } from 'react';
+
+// Lazy-loaded routes: these pages pull in heavy libraries (docx-preview for the
+// resume optimizer, recharts for analytics) that the dashboard never uses, so
+// they're split into their own chunks and only fetched/parsed on first visit.
+const ResumeOptimizer = lazy(() => import('./pages/ResumeOptimizer.jsx'));
+const Analytics = lazy(() => import('./pages/Analytics.jsx'));
+const Settings = lazy(() => import('./pages/Settings.jsx'));
 import { SpeedInsights } from '@vercel/speed-insights/react';
 
 function RequireAuth({ children }) {
@@ -81,16 +85,18 @@ function AppContent() {
         onClose={() => setPaletteOpen(false)}
         onNavigate={handleCommandNavigate}
       />
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        <Route path="/" element={<RequireAuth><Dashboard /></RequireAuth>} />
-        <Route path="/profile" element={<RequireAuth><Profile /></RequireAuth>} />
-        <Route path="/resume/optimizer" element={<RequireAuth><ResumeOptimizer /></RequireAuth>} />
-        <Route path="/analytics" element={<RequireAuth><Analytics /></RequireAuth>} />
-        <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <Suspense fallback={<div className="auth-screen"><div className="auth-card">Loading…</div></div>}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/" element={<RequireAuth><Dashboard /></RequireAuth>} />
+          <Route path="/profile" element={<RequireAuth><Profile /></RequireAuth>} />
+          <Route path="/resume/optimizer" element={<RequireAuth><ResumeOptimizer /></RequireAuth>} />
+          <Route path="/analytics" element={<RequireAuth><Analytics /></RequireAuth>} />
+          <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
     </>
   );
 }

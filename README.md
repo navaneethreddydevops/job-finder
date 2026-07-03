@@ -6,7 +6,7 @@ A full-stack, Claude-powered dashboard that researches LinkedIn and the Workday,
 
 ## Features
 * **Multi-agent Job Finder**: An orchestrator searches every **role × source** pair with the Exa/Tavily tools across **LinkedIn (`linkedin.com/jobs`) and the ATS careers portals Workday (`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io`), Lever (`jobs.lever.co`), and Ashby (`jobs.ashbyhq.com`)**, hands batches of candidates to parallel `job_scout` subagents (via the Task tool) for verification and formatting, then merges and de-duplicates the results.
-* **Always-on target roles**: Every run searches Principal DevOps / Cloud / Kubernetes / SRE roles; a typed query adds an extra role.
+* **User-driven target role**: Every run searches the role typed as the Search Target; the default Principal DevOps / Cloud / Kubernetes / SRE roles are searched only when the query is empty.
 * **Remote + full-time only**: Collects only remote, full-time (FTE) roles; non-remote, contract, temporary, part-time, and internship postings are skipped.
 * **Fresh-only results**: Collects and displays **only jobs posted within the last 7 days**.
 * **No volume cap**: Pulls as many matching full-time roles as it can find.
