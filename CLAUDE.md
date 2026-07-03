@@ -212,6 +212,20 @@ Workday/Greenhouse/Lever/Ashby domains in `ALL_SOURCE_DOMAINS` are allowed.
   mid-run — e.g. after a browser refresh — is replayed that buffer before live streaming,
   so refreshing never loses the in-flight agent console. The frontend's mount effect polls
   `/api/status`, and if a run is active it reconnects and lets the replay repopulate `logs`.
+  **Resumable stream — keep it:** every line carries a monotonic `id:` (`log_seq`, never
+  reset across runs). A reconnecting client sends the last id it saw (native EventSource
+  auto-reconnect uses the `Last-Event-ID` header; the manual reconnect passes a
+  `?last_event_id=` query param — the **header wins** when both are present), and the stream
+  replays **only newer** lines. This makes reconnects seamless — no duplicated console output,
+  no reset flash — which matters because managed hosts (FastAPI Cloud) impose a hard
+  max-duration cap on the long-lived SSE request and cut it periodically. In `Dashboard.jsx`,
+  `startStreaming` resumes from `lastEventIdRef` and `onerror` lets the browser's native
+  reconnect handle transient drops (only a permanently `CLOSED` stream triggers a manual
+  retry) — do not revert to `es.close()` + `setLogs([])` on every error, which re-dumped the
+  whole buffer and flashed the console. The response also sets `Cache-Control: no-cache`,
+  `X-Accel-Buffering: no`, `Connection: keep-alive` to defeat proxy buffering; keep them.
+  **Note:** this in-memory scheme requires a **single backend instance** — see `fastapi-cloud.yml`
+  (`autoscale` pinned to 1) — until log/run state is externalized (Redis/Postgres).
   **Memory bounds — keep them:** each SSE client's queue is bounded (`LOG_QUEUE_MAX`,
   published with `put_nowait` + drop-oldest so a stalled client can't buffer a whole run in
   RAM or block the agent), and `Dashboard.jsx` caps its `logs` state at `LOG_LINES_MAX`
