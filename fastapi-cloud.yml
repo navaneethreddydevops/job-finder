@@ -27,7 +27,21 @@ health_check:
 # resources:
 #   cpu: "0.5"
 #   memory: "512Mi"
+
+# Scaling — PINNED TO A SINGLE INSTANCE ON PURPOSE.
 #
-# autoscale:
-#   min_instances: 1
-#   max_instances: 3
+# The agent run's live state (agent_status, log_history, and the SSE subscriber
+# queues in backend/main.py) is in-memory per-process. With >1 replica behind
+# FastAPI Cloud's round-robin load balancer, POST /api/pull, GET /api/stream, and
+# GET /api/status each land on an independently-chosen replica, so the SSE stream
+# and status poll frequently hit a replica that has no knowledge of the run — which
+# is exactly the "agent disconnects, reconnects on refresh, repeats" loop.
+#
+# FastAPI Cloud does not expose sticky-session / session-affinity LB config, so the
+# app cannot pin a client to a replica. Running exactly ONE instance makes every
+# request land on the same process (trivially "sticky") and keeps the UI <-> backend
+# stream connected for the whole run. Do NOT raise these above 1 until the streaming
+# state is externalized (Redis Pub/Sub for logs + run status in Postgres).
+autoscale:
+  min_instances: 1
+  max_instances: 1
