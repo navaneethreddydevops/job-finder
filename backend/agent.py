@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import logfire
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
@@ -188,6 +189,46 @@ async def run_job_finder_agent(
     job_types: list[str] = None,
     time_period_days: int = 7,
 ):
+    """Logfire-traced wrapper around the agent run (see `_run_job_finder_agent`).
+
+    The Agent SDK spawns the `claude` CLI as a subprocess, so Logfire's
+    `instrument_anthropic()` can't see these calls — instead the whole run is a
+    manual span, with tool calls / scout batches / final usage recorded as events
+    inside it (emitted from the message-stream loop below).
+    """
+    with logfire.span(
+        "job_finder_agent run",
+        query=query,
+        user_id=user_id,
+        job_types=job_types or ["fulltime", "remote"],
+        time_period_days=time_period_days,
+        is_resume=is_resume,
+    ) as span:
+        data = await _run_job_finder_agent(
+            query=query,
+            user_id=user_id,
+            log_callback=log_callback,
+            session_id=session_id,
+            is_resume=is_resume,
+            batch_callback=batch_callback,
+            job_types=job_types,
+            time_period_days=time_period_days,
+        )
+        jobs = data.get("jobs") if isinstance(data, dict) else None
+        span.set_attribute("jobs_found", len(jobs) if isinstance(jobs, list) else 0)
+        return data
+
+
+async def _run_job_finder_agent(
+    query: str = "",
+    user_id: int = None,
+    log_callback=None,
+    session_id=None,
+    is_resume=False,
+    batch_callback=None,
+    job_types: list[str] = None,
+    time_period_days: int = 7,
+):
     """Initializes and executes the job finder agent using the claude-agent-sdk.
 
     The agent researches the user's Search Target `query` across the SEARCH_SOURCES
@@ -365,6 +406,11 @@ async def run_job_finder_agent(
                         # runs — a real bug, previously masked because it "fails safe").
                         if block.name == "Agent":
                             scout_task_ids.add(block.id)
+                        logfire.info(
+                            "agent tool call: {tool}",
+                            tool=block.name,
+                            tool_input=block.input,
+                        )
                         if log_callback:
                             tool_msg = f"\n[Tool Call] Running tool '{block.name}' with arguments: {block.input}\n"
                             await log_callback(tool_msg)
@@ -387,6 +433,10 @@ async def run_job_finder_agent(
                         )
                         if batch:
                             _remember(batch)
+                            logfire.info(
+                                "job_scout batch: {job_count} jobs",
+                                job_count=len(batch),
+                            )
                         if batch and batch_callback:
                             try:
                                 await batch_callback(batch)
@@ -398,6 +448,15 @@ async def run_job_finder_agent(
 
             # When the generator completes the task, it outputs a ResultMessage
             if isinstance(msg, ResultMessage):
+                logfire.info(
+                    "agent run result",
+                    is_error=msg.is_error,
+                    num_turns=getattr(msg, "num_turns", None),
+                    duration_ms=getattr(msg, "duration_ms", None),
+                    duration_api_ms=getattr(msg, "duration_api_ms", None),
+                    total_cost_usd=getattr(msg, "total_cost_usd", None),
+                    usage=getattr(msg, "usage", None),
+                )
                 if msg.is_error:
                     error_detail = msg.errors if msg.errors else msg.result
                     if log_callback:

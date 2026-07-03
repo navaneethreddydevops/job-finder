@@ -70,6 +70,18 @@ via FastAPI Cloud CLI. See README "Cloud Deployment" for steps.
   `agent.py` does not drop it. Never an API key. FastAPI Cloud auto-detects `backend/main.py`.
 - **Database → Neon.** Set `DATABASE_URL` in the FastAPI Cloud dashboard Secrets section (include
   `?sslmode=require`). Secrets are never committed to git — set them in the dashboard only.
+- **Observability → Pydantic Logfire.** `backend/main.py` calls `logfire.configure()` +
+  `instrument_fastapi(app)` + `instrument_system_metrics()` + `instrument_anthropic()` (project
+  `navaneethreddyai/starter-project`, US region). Locally it sends via the git-ignored
+  `.logfire/` credentials dir (`uv run logfire auth` + `logfire projects use`); in prod set
+  `LOGFIRE_TOKEN` as a FastAPI Cloud secret. With neither present, telemetry is a silent no-op
+  so tests/CI/fresh clones still boot. Because the Agent SDK spawns the `claude` CLI subprocess
+  (invisible to `instrument_anthropic`), the agent runs are traced with **manual spans**:
+  `run_job_finder_agent` (agent.py) and `_optimize_with_claude` (resume.py) are thin
+  Logfire-span wrappers around `_run_job_finder_agent` / `_optimize_with_claude_impl`, and the
+  message-stream loops emit events for tool calls, scout batches, and the final
+  `ResultMessage` metrics (turns, duration, cost, token usage). Keep the wrappers when
+  refactoring these functions.
 
 ## Authentication — OAuth only, never an API key
 
