@@ -8,8 +8,9 @@ A full-stack **Job Finder**. An autonomous agent built on the **Claude Agent SDK
 five sources — **LinkedIn (`linkedin.com/jobs`) and the ATS-hosted company careers portals
 Workday (`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io` / `job-boards.greenhouse.io`),
 Lever (`jobs.lever.co`), and Ashby (`jobs.ashbyhq.com`)** — for **remote, full-time** jobs posted
-in the **last 7 days**, using parallel `job_scout` subagents. It always searches a fixed set of Principal-level platform/infra
-roles (DevOps, Cloud, Kubernetes, SRE), plus any extra role the user types. Results are extracted as
+in the **last 7 days**, using parallel `job_scout` subagents. It searches the role the user types
+as the Search Target (falling back to a default set of Principal-level platform/infra roles —
+DevOps, Cloud, Kubernetes, SRE — only when the query is empty). Results are extracted as
 structured JSON and stored in SQLite. A **FastAPI** backend exposes the agent + data over REST/SSE,
 and a **Vite + React** dashboard renders the results with live agent-thought streaming.
 
@@ -84,8 +85,9 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
 `run_job_finder_agent(query)` in `backend/agent.py` configures a `ClaudeSDKClient` as an
 **orchestrator** plus a `job_scout` **subagent**:
 
-- The orchestrator always searches a fixed set of `DEFAULT_ROLES` (Principal DevOps / Cloud /
-  Kubernetes / Site Reliability Engineer) and appends any non-empty user query as an extra role. It
+- The orchestrator searches ONLY the user's Search Target query as the role; `DEFAULT_ROLES`
+  (Principal DevOps / Cloud / Kubernetes / Site Reliability Engineer) are used solely as a
+  fallback when the query is empty. It
   searches every **role × source** pair itself with the Exa/Tavily tools (in-process SDK MCP
   tools can't be granted to subagents) — **LinkedIn plus the Workday/Greenhouse/Lever/Ashby
   careers portals only** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter) — then spawns
@@ -113,15 +115,16 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
 - **Remote, full-time only**: The agent keeps only remote full-time (FTE) roles and excludes
   non-remote, contract, temporary, internship, and part-time roles.
 
-### Always-searched roles + fixed sources — LinkedIn plus ATS careers portals
-The agent always researches `DEFAULT_ROLES` in `agent.py` (Principal DevOps / Cloud / Kubernetes /
-Site Reliability Engineer); a non-empty user query is added as an extra role. Sources are fixed to
+### User-driven role + fixed sources — LinkedIn plus ATS careers portals
+The agent researches the user's Search Target query as the only role; `DEFAULT_ROLES` in
+`agent.py` (Principal DevOps / Cloud / Kubernetes / Site Reliability Engineer) are a fallback
+used only when the query is empty — never added on top of a typed query. Sources are fixed to
 `SEARCH_SOURCES = ["LinkedIn", "Workday", "Greenhouse", "Lever", "Ashby"]` — **LinkedIn
 (`linkedin.com/jobs`) and the ATS-hosted careers portals Workday (`*.myworkdayjobs.com`),
 Greenhouse (`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever (`jobs.lever.co`), and
 Ashby (`jobs.ashbyhq.com`)** — all direct employer postings with reliable dates. Do not
 reintroduce aggregator boards (Glassdoor, Dice, Monster, Indeed, ZipRecruiter): stale reposts,
-scrape-hostile, unreliable dates. The source list and role list are intentionally fixed in
+scrape-hostile, unreliable dates. The source list is intentionally fixed in
 `agent.py`'s scout prompt and run prompt. The `source` field is one of `'LinkedIn'`, `'Workday'`,
 `'Greenhouse'`, `'Lever'`, or `'Ashby'`.
 
@@ -209,6 +212,10 @@ Workday/Greenhouse/Lever/Ashby domains in `ALL_SOURCE_DOMAINS` are allowed.
   mid-run — e.g. after a browser refresh — is replayed that buffer before live streaming,
   so refreshing never loses the in-flight agent console. The frontend's mount effect polls
   `/api/status`, and if a run is active it reconnects and lets the replay repopulate `logs`.
+  **Memory bounds — keep them:** each SSE client's queue is bounded (`LOG_QUEUE_MAX`,
+  published with `put_nowait` + drop-oldest so a stalled client can't buffer a whole run in
+  RAM or block the agent), and `Dashboard.jsx` caps its `logs` state at `LOG_LINES_MAX`
+  (mirrors `LOG_HISTORY_MAX`). Don't revert either to unbounded.
 - `GET /api/status`, `GET /api/health`, `PATCH /api/jobs/{id}/apply`, `POST /api/jobs/clear`.
 
 ## Agent tools (Task 1)
@@ -324,7 +331,9 @@ handling ad hoc.
 - Frontend is a React Router app: `App.jsx` is the router root, `Dashboard.jsx` is the main
   job dashboard, and `pages/` holds Login, Register, Profile, and ResumeOptimizer. The
   dashboard also registers **WebMCP** tools (`document.modelContext`) so an in-browser agent
-  can drive it.
+  can drive it. The heavy pages — ResumeOptimizer (`docx-preview`), Analytics (`recharts`),
+  Settings — are **`React.lazy` route chunks** (see `App.jsx`); keep new heavy-dependency
+  pages lazy too so the dashboard bundle stays small.
 - **Design system — Notion-inspired light theme.** All styling lives in
   `frontend/src/index.css` as the single source of truth, driven by `:root` CSS custom
   properties (`--primary`, `--text-*`, `--border`, `--*-glow`, …) and semantic class names

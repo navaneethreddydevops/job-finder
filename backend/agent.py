@@ -61,10 +61,9 @@ SCOUT_ALLOWED_TOOLS = [
 ]
 
 
-# Target roles that are ALWAYS searched on every run, regardless of the typed query.
-# These are remote, full-time, Principal-level platform/infra roles. The orchestrator does
-# the searching itself (in-process search tools can't be granted to subagents), so a full
-# role fan-out no longer multiplies agent spawns — scouts only format batches.
+# Fallback roles, used ONLY when the user submits an empty Search Target. When the user
+# types a query in Agent Controls, that query is the ONLY role searched — these defaults
+# are never added on top of it.
 DEFAULT_ROLES = [
     "Principal DevOps Engineer",
     "Principal Cloud Engineer",
@@ -191,13 +190,13 @@ async def run_job_finder_agent(
 ):
     """Initializes and executes the job finder agent using the claude-agent-sdk.
 
-    The agent ALWAYS researches the DEFAULT_ROLES (remote, full-time, last 7 days) across
-    the SEARCH_SOURCES (LinkedIn plus the Workday/Greenhouse/Lever/Ashby careers portals).
-    A non-empty `query` is added as an extra role to search on top of the defaults.
+    The agent researches the user's Search Target `query` across the SEARCH_SOURCES
+    (LinkedIn plus the Workday/Greenhouse/Lever/Ashby careers portals). Only when the
+    query is empty does it fall back to the DEFAULT_ROLES.
 
     Args:
-        query: Optional extra search role/term, e.g. "Staff Platform Engineer". The four
-            DEFAULT_ROLES are always searched regardless of this value.
+        query: The search role/term from Agent Controls, e.g. "Staff Platform Engineer".
+            This is the only role searched; DEFAULT_ROLES are a fallback for an empty query.
         user_id: The ID of the user running the search (for multi-tenant data isolation)
         log_callback: Async function to stream thoughts/logs to (receives strings)
         session_id: A valid UUID string.
@@ -222,11 +221,10 @@ async def run_job_finder_agent(
     run_date = now.strftime("%Y-%m-%d")
     since_date = (now - timedelta(days=time_period_days)).strftime("%Y-%m-%d")
 
-    # Always search the default Principal roles; add the typed query as an extra role.
-    roles = list(DEFAULT_ROLES)
+    # Search ONLY the user's Search Target query; the hardcoded DEFAULT_ROLES are used
+    # solely as a fallback when no query was typed.
     q = (query or "").strip()
-    if q and q.lower() not in [r.lower() for r in roles]:
-        roles.append(q)
+    roles = [q] if q else list(DEFAULT_ROLES)
     roles_text = "; ".join(roles)
     sources_text = ", ".join(SEARCH_SOURCES)
 
@@ -310,8 +308,8 @@ async def run_job_finder_agent(
         f"2. tavily_search(query='<role> {query_keywords}', source='<source>', "
         f"time_period_days={time_period_days})\n"
         f"3. If a pair returned fewer than 5 candidates, retry ONCE with a broader query "
-        f"variation (drop 'Principal', or use a synonym like 'Platform Engineer' / "
-        f"'Infrastructure Engineer' / 'SRE'), then move on.\n"
+        f"variation (drop the seniority qualifier — e.g. 'Principal'/'Senior'/'Staff' — or "
+        f"use a close synonym of the role title), then move on.\n"
         f"4. Keep candidates where posted_within_7d is true or null, remote is not false, "
         f"and full_time is not false. When a field is null, keep the candidate — the scout "
         f"verifies borderline cases.\n"

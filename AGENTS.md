@@ -7,9 +7,9 @@ the **Claude Agent SDK** (`claude-agent-sdk`). The implementation lives in
 ## Overview
 
 The Job Finder is a specialized autonomous agent that researches **LinkedIn and the
-Workday/Greenhouse/Lever/Ashby careers portals** for **remote, full-time** positions in a fixed set of Principal-level
-platform/infra roles (DevOps, Cloud, Kubernetes, SRE) — plus any extra role the user types —
-**posted within the last 7 days**. It runs asynchronously as a FastAPI background task,
+Workday/Greenhouse/Lever/Ashby careers portals** for **remote, full-time** positions in the role
+the user types as the Search Target (falling back to a default set of Principal-level platform/infra
+roles — DevOps, Cloud, Kubernetes, SRE — only when the query is empty), **posted within the last 7 days**. It runs asynchronously as a FastAPI background task,
 delegates breadth to parallel subagents (one per role × source), evaluates findings against
 the remote + full-time + 7-day-freshness criteria, and returns structured JSON that is
 persisted to SQLite.
@@ -49,8 +49,9 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
 ### Orchestrator + subagent design
 
-* The **orchestrator** always searches `DEFAULT_ROLES` (Principal DevOps / Cloud / Kubernetes /
-  Site Reliability Engineer) plus any user-supplied extra role. It runs the `exa_search` +
+* The **orchestrator** searches ONLY the user's Search Target query as the role; `DEFAULT_ROLES`
+  (Principal DevOps / Cloud / Kubernetes / Site Reliability Engineer) are a fallback used only
+  when the query is empty. It runs the `exa_search` +
   `tavily_search` tools itself for **every role × source** pair (in-process SDK MCP tools can't
   be granted to subagents) — **LinkedIn (`linkedin.com/jobs`) and the ATS careers portals
   Workday (`*.myworkdayjobs.com`), Greenhouse, Lever, and Ashby only** (no
@@ -64,7 +65,7 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 * **Sources**: ONLY LinkedIn and the Workday/Greenhouse/Lever/Ashby careers portals — fixed
   in `agent.py` (`SEARCH_SOURCES`, scout prompt, run prompt). Do not add aggregator boards
   (Indeed, Glassdoor, Dice, Monster, ZipRecruiter).
-* **Roles**: always search `DEFAULT_ROLES`; a non-empty query is appended as an extra role.
+* **Roles**: search the user's Search Target query only; `DEFAULT_ROLES` are the fallback for an empty query.
 * **Remote-only**: every kept job must be remote.
 * **Volume**: pull **as many** matching jobs as possible — there is no upper limit (the
   previous "aim for 20–30" cap was removed); fan out one subagent per role × source.
