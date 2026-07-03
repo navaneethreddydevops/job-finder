@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 from collections import deque
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -65,7 +65,16 @@ LOG_QUEUE_MAX = LOG_HISTORY_MAX
 # (e.g. after a browser refresh) can replay what was already emitted. Bounded to
 # cap memory; the run itself is in-memory, so surviving a browser refresh — not a
 # server restart — is the intended scope. Uses deque with maxlen for efficient append.
+# Entries are (seq, msg) tuples so reconnecting clients can resume from the last
+# line they saw (SSE Last-Event-ID) instead of re-dumping the whole buffer.
 log_history: deque = deque(maxlen=LOG_HISTORY_MAX)
+# Monotonic, never-reset sequence id stamped on every published log line. It powers
+# SSE resume: an EventSource that drops (platform request-duration cap, proxy blip)
+# reconnects with Last-Event-ID = the last seq it received, and the stream replays
+# ONLY lines with a greater seq — so a reconnect is seamless (no duplicated lines,
+# no console reset). Kept monotonic ACROSS runs on purpose: a client holding a stale
+# id from a prior run still gets the new run's (higher-seq) lines.
+log_seq = 0
 
 
 class PullRequest(BaseModel):
@@ -82,17 +91,20 @@ async def publish_log(msg: str):
     """Broadcasts a log message to all active stream connections and buffers it so
     reconnecting clients can replay the current run's history. Deque automatically
     evicts oldest entries when maxlen is exceeded."""
+    global log_seq
     print(msg, flush=True)
-    log_history.append(msg)
+    log_seq += 1
+    item = (log_seq, msg)
+    log_history.append(item)
     for q in list(log_queues):
         try:
-            q.put_nowait(msg)
+            q.put_nowait(item)
         except asyncio.QueueFull:
             # Stalled client: evict its oldest line to make room, never block
             # the agent run on a slow consumer.
             try:
                 q.get_nowait()
-                q.put_nowait(msg)
+                q.put_nowait(item)
             except Exception:
                 pass
         except Exception:
@@ -355,8 +367,20 @@ async def pull_jobs(req: PullRequest, background_tasks: BackgroundTasks, user: d
 
 
 @app.get("/api/stream")
-async def stream_logs():
-    """Server-Sent Events (SSE) endpoint to stream agent thought logs in real time."""
+async def stream_logs(request: Request, last_event_id: str | None = None):
+    """Server-Sent Events (SSE) endpoint to stream agent thought logs in real time.
+
+    Resumable: a reconnecting client tells us the last line it saw so we replay ONLY
+    newer ones (no duplicates, no console reset). Native EventSource auto-reconnects
+    send that via the ``Last-Event-ID`` header; our manual reconnect passes it as the
+    ``last_event_id`` query param. The header is authoritative when present (it's the
+    freshest on a native reconnect); the query param seeds the very first open.
+    """
+    resume_raw = request.headers.get("last-event-id") or last_event_id
+    try:
+        resume_seq = int(resume_raw) if resume_raw else 0
+    except (TypeError, ValueError):
+        resume_seq = 0
 
     async def event_generator():
         q = asyncio.Queue(maxsize=LOG_QUEUE_MAX)
@@ -366,30 +390,45 @@ async def stream_logs():
         history_snapshot = list(log_history)
         log_queues.append(q)
         try:
-            # Yield initial status message
-            yield f"data: {json.dumps({'message': '[Connection Established] Connected to agent logs stream.'})}\n\n"
-            # Replay the current run's buffered logs so a reconnecting client (e.g. after
-            # a page refresh) sees everything emitted before it connected.
-            for msg in history_snapshot:
-                yield f"data: {json.dumps({'message': msg})}\n\n"
+            # Comment line (ignored by EventSource) just to open the stream promptly.
+            yield ": connected\n\n"
+            # Replay the current run's buffered logs the client hasn't seen yet, so a
+            # reconnect (page refresh, dropped connection) repopulates seamlessly.
+            for seq, msg in history_snapshot:
+                if seq <= resume_seq:
+                    continue
+                yield f"id: {seq}\ndata: {json.dumps({'message': msg})}\n\n"
             while True:
                 # Wait for the next log line, but never sit silent for long: proxies and
                 # load balancers idle-close quiet connections, which showed up as the UI
                 # "disconnecting" mid-run. An SSE comment line (": keep-alive") is ignored
                 # by EventSource but keeps the connection alive through intermediaries.
                 try:
-                    msg = await asyncio.wait_for(q.get(), timeout=15)
+                    seq, msg = await asyncio.wait_for(q.get(), timeout=15)
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
                     continue
-                yield f"data: {json.dumps({'message': msg})}\n\n"
+                if seq <= resume_seq:
+                    continue
+                yield f"id: {seq}\ndata: {json.dumps({'message': msg})}\n\n"
         except asyncio.CancelledError:
             pass
         finally:
             if q in log_queues:
                 log_queues.remove(q)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            # Defeat proxy/CDN buffering so lines (and keep-alives) reach the browser
+            # immediately; without these, intermediaries buffer the stream and the
+            # connection looks dead until it's idle-closed.
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # Serve React frontend build files in production (look in the parent directory)

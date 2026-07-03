@@ -130,6 +130,9 @@ function Dashboard() {
   const consoleEndRef = useRef(null);
   const eventSourceRef = useRef(null);
   const reconnectTimerRef = useRef(null);
+  // Last SSE event id we received, so a reconnect resumes from there (the backend
+  // replays only newer lines — no duplicated console output, no reset flash).
+  const lastEventIdRef = useRef('');
   const dialogRef = useRef(null);
   const lastFocusRef = useRef(null);
   const stateRef = useRef({});
@@ -275,7 +278,8 @@ function Dashboard() {
           const data = await resp.json();
           setStatus(data);
           if (data.status === 'running') {
-            setLogs([]);
+            // Resume from the last id we saw (startStreaming reads lastEventIdRef),
+            // so the backend replays only new lines — the console is NOT cleared.
             startStreaming();
           }
           // idle: the run finished while we were disconnected — the status-polling
@@ -289,9 +293,16 @@ function Dashboard() {
 
   const startStreaming = () => {
     if (eventSourceRef.current) eventSourceRef.current.close();
-    const es = new EventSource(apiUrl('/api/stream'));
+    // Resume from the last line we saw so a reconnect (platform request-duration cap,
+    // proxy blip, refresh) replays only newer lines instead of re-dumping the buffer.
+    // Native EventSource reconnects send this via the Last-Event-ID header; for our
+    // first/manual open we pass it as a query param (EventSource can't set headers).
+    const resume = lastEventIdRef.current;
+    const url = apiUrl('/api/stream') + (resume ? `?last_event_id=${encodeURIComponent(resume)}` : '');
+    const es = new EventSource(url);
     eventSourceRef.current = es;
     es.onmessage = (event) => {
+      if (event.lastEventId) lastEventIdRef.current = event.lastEventId;
       try {
         const data = JSON.parse(event.data);
         // Cap the console scrollback to match the backend's LOG_HISTORY_MAX replay
@@ -305,9 +316,13 @@ function Dashboard() {
       } catch (err) { console.error('Failed to parse log message:', err); }
     };
     es.onerror = () => {
-      console.log('SSE connection lost — scheduling reconnect');
-      es.close();
-      scheduleReconnect();
+      // A transient drop leaves readyState CONNECTING — let the browser's native
+      // reconnect resume it (it re-sends Last-Event-ID, so no flash). Only when the
+      // browser gives up (CLOSED — e.g. a fatal/CORS error) do we retry manually.
+      if (es.readyState === EventSource.CLOSED) {
+        console.log('SSE permanently closed — scheduling manual reconnect');
+        scheduleReconnect();
+      }
     };
   };
 
