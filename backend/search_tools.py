@@ -3,8 +3,9 @@
 returned too few results).
 
 Both tools are model-driven: the orchestrator calls `exa_search` / `tavily_search` with a
-query and its assigned `source` ("LinkedIn" or "Workday"). The tool scopes the search to
-that source's domain and returns a JSON list of candidate postings.
+query and its assigned `source` ("LinkedIn", "Workday", "Greenhouse", "Lever", or "Ashby").
+The tool scopes the search to that source's domain(s) and returns a JSON list of candidate
+postings.
 
 Recency/remote/full-time verification is done HERE, in Python, not left to the agent's
 `WebFetch` — Workday's careers portal is a JS-rendered SPA that `WebFetch` cannot render
@@ -41,15 +42,28 @@ EXA_API_URL = "https://api.exa.ai/search"
 TAVILY_SEARCH_API_URL = "https://api.tavily.com/search"
 TAVILY_EXTRACT_API_URL = "https://api.tavily.com/extract"
 
-# How many results to request per call — conservative to avoid API rate limits.
-# Original limits (30/25) were safe; increased slightly but requests throttled heavily.
-EXA_NUM_RESULTS = 30
-TAVILY_NUM_RESULTS = 25
-RECENCY_DAYS = 7
+# How many results to request per call. Exa supports up to 100; 50 doubles recall per
+# call without blowing up the orchestrator's context. Tavily's documented max is 20.
+EXA_NUM_RESULTS = 50
+TAVILY_NUM_RESULTS = 20
+DEFAULT_RECENCY_DAYS = 7
 HTTP_TIMEOUT = 30
 # Tavily's /extract endpoint is called in batches to backfill Exa results with verified
 # content; cap batch size defensively even though Tavily accepts more per call.
 EXTRACT_BATCH_SIZE = 20
+
+
+# Every allowed job-source domain. LinkedIn plus ATS-hosted company careers portals —
+# direct employer postings with reliable dates. Aggregator boards (Indeed, Glassdoor,
+# Dice, Monster, ZipRecruiter) are intentionally excluded; do not add them.
+ALL_SOURCE_DOMAINS = [
+    "linkedin.com",
+    "myworkdayjobs.com",
+    "boards.greenhouse.io",
+    "job-boards.greenhouse.io",
+    "jobs.lever.co",
+    "jobs.ashbyhq.com",
+]
 
 
 def _domains_for(source: str) -> list[str]:
@@ -59,12 +73,18 @@ def _domains_for(source: str) -> list[str]:
         return ["myworkdayjobs.com"]
     if "linkedin" in s:
         return ["linkedin.com"]
-    # Unknown / unspecified → search both allowed sources.
-    return ["linkedin.com", "myworkdayjobs.com"]
+    if "greenhouse" in s:
+        return ["boards.greenhouse.io", "job-boards.greenhouse.io"]
+    if "lever" in s:
+        return ["jobs.lever.co"]
+    if "ashby" in s:
+        return ["jobs.ashbyhq.com"]
+    # Unknown / unspecified → search all allowed sources.
+    return list(ALL_SOURCE_DOMAINS)
 
 
-def _since_iso() -> str:
-    return (datetime.now(timezone.utc) - timedelta(days=RECENCY_DAYS)).strftime(
+def _since_iso(days: int = DEFAULT_RECENCY_DAYS) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z"
     )
 
@@ -195,16 +215,14 @@ def _parse_listing_signals(raw_content: str, url: str) -> dict:
     }
 
 
-def _enrich_result(result: dict, trust_search_recency: bool = False) -> dict:
-    """Annotate a result with remote/full_time/posted_within_7d, parsed from its rendered
+def _enrich_result(result: dict, recency_days: int = DEFAULT_RECENCY_DAYS, trust_search_recency: bool = False) -> dict:
+    """Annotate a result with remote/full_time/posted_within_recency_days, parsed from its rendered
     page text where possible.
 
-    `trust_search_recency`: when True (Tavily-sourced results only), Tavily's own `days=7`
-    search parameter already time-filtered this result server-side before we ever see it.
-    So if our page-text parse can't find an explicit date (the crawler is blocked on some
-    Workday tenants, or the phrasing doesn't match), default `posted_within_7d` to True
-    rather than unknown — Tavily's own filter is still a real (if less precise) guarantee.
-    An explicit *stale* parse (page text says >7 days) always overrides this default.
+    `trust_search_recency`: when True (Tavily-sourced results only), Tavily's own search parameter
+    already time-filtered this result server-side before we ever see it. So if our page-text parse
+    can't find an explicit date (the crawler is blocked on some Workday tenants, or the phrasing
+    doesn't match), default `posted_within_recency_days` to True rather than unknown.
     """
     signals = _parse_listing_signals(result.get("raw_content") or "", result.get("url") or "")
     days = signals["posted_days_ago"]
@@ -213,7 +231,7 @@ def _enrich_result(result: dict, trust_search_recency: bool = False) -> dict:
     result["posted_days_ago"] = days
     result["posted_text"] = signals["posted_text"]
     if days is not None:
-        result["posted_within_7d"] = days <= RECENCY_DAYS
+        result["posted_within_7d"] = days <= recency_days
         result["date_confidence"] = "parsed"
     elif trust_search_recency:
         result["posted_within_7d"] = True
@@ -253,19 +271,20 @@ async def _tavily_extract(session: aiohttp.ClientSession, api_key: str, urls: li
 
 @tool(
     "exa_search",
-    "Search the Exa API for recent job postings on the assigned source (LinkedIn or Workday "
-    "careers). Returns a JSON array of candidate postings, each pre-annotated with `remote` "
+    "Search the Exa API for recent job postings on the assigned source (LinkedIn, or the "
+    "Workday/Greenhouse/Lever/Ashby careers portals). Returns a JSON array of candidate "
+    "postings, each pre-annotated with `remote` "
     "(bool|null), `full_time` (bool|null), `posted_days_ago` (number|null), and "
     "`posted_within_7d` (bool|null) — computed by rendering the page server-side, since "
     "WebFetch cannot render Workday's JS pages. KEEP a candidate only if posted_within_7d is "
     "true, remote is true (or null with the title/snippet clearly indicating remote), and "
     "full_time is not explicitly false. If a field is null, the page couldn't be verified — "
     "use judgment from the title/snippet, or drop it if unsure.",
-    {"query": str, "source": str},
+    {"query": str, "source": str, "time_period_days": int},
 )
 async def exa_search(args: dict) -> dict:
-    # Aggressive throttle — 4s between calls to prevent Claude API rate limits.
-    await asyncio.sleep(4.0)
+    # Throttle to prevent Claude API rate limits (reduced from 4s to 1.5s)
+    await asyncio.sleep(1.5)
     api_key = os.environ.get("EXA_API_KEY")
     if not api_key:
         return _msg(
@@ -276,6 +295,7 @@ async def exa_search(args: dict) -> dict:
     if not query:
         return _msg("exa_search requires a non-empty 'query'.")
     domains = _domains_for(args.get("source"))
+    time_period_days = args.get("time_period_days", DEFAULT_RECENCY_DAYS)
 
     payload = {
         "query": query,
@@ -284,10 +304,10 @@ async def exa_search(args: dict) -> dict:
         "includeDomains": domains,
         "contents": {"text": {"maxCharacters": 500}},
     }
-    # Exa's published-date filter works for LinkedIn but zeroes out Workday portals
-    # (their listing pages lack a publish date Exa recognizes).
-    if "myworkdayjobs.com" not in domains:
-        payload["startPublishedDate"] = _since_iso()
+    # Exa's published-date filter works for LinkedIn but zeroes out the ATS portals
+    # (Workday/Greenhouse/Lever/Ashby listing pages lack a publish date Exa recognizes).
+    if domains == ["linkedin.com"]:
+        payload["startPublishedDate"] = _since_iso(time_period_days)
     headers = {"x-api-key": api_key, "Content-Type": "application/json"}
     try:
         async with aiohttp.ClientSession() as session:
@@ -313,7 +333,7 @@ async def exa_search(args: dict) -> dict:
                     }
                 )
 
-            # Backfill verified remote/full_time/posted_within_7d via Tavily's extractor
+            # Backfill verified remote/full_time/posted_within_recency via Tavily's extractor
             # (Exa's own extracted text is unusable for Workday and login-walled on LinkedIn).
             tavily_key = os.environ.get("TAVILY_API_KEY")
             if tavily_key and results:
@@ -325,14 +345,15 @@ async def exa_search(args: dict) -> dict:
     except Exception as e:
         return _msg(f"Exa search error: {e}")
 
-    results = [_enrich_result(r) for r in results]
+    results = [_enrich_result(r, recency_days=time_period_days) for r in results]
     return _ok({"provider": "exa", "domains": domains, "count": len(results), "results": results})
 
 
 @tool(
     "tavily_search",
-    "Search the Tavily API for recent job postings on the assigned source (LinkedIn or "
-    "Workday careers). Returns a JSON array of candidate postings, each pre-annotated with "
+    "Search the Tavily API for recent job postings on the assigned source (LinkedIn, or the "
+    "Workday/Greenhouse/Lever/Ashby careers portals). Returns a JSON array of candidate "
+    "postings, each pre-annotated with "
     "`remote` (bool|null), `full_time` (bool|null), `posted_days_ago` (number|null), and "
     "`posted_within_7d` (bool|null) — parsed from the rendered page (Workday's 'remote "
     "type'/'time type'/'posted on' labels, or LinkedIn's relative post-date). KEEP a "
@@ -340,11 +361,11 @@ async def exa_search(args: dict) -> dict:
     "snippet clearly indicating remote), and full_time is not explicitly false. If a field "
     "is null, the page couldn't be verified — use judgment from the title/snippet, or drop "
     "it if unsure.",
-    {"query": str, "source": str},
+    {"query": str, "source": str, "time_period_days": int},
 )
 async def tavily_search(args: dict) -> dict:
-    # Aggressive throttle — 4s between calls to prevent Claude API rate limits.
-    await asyncio.sleep(4.0)
+    # Throttle to prevent Claude API rate limits (reduced from 4s to 1.5s)
+    await asyncio.sleep(1.5)
     api_key = os.environ.get("TAVILY_API_KEY")
     if not api_key:
         return _msg(
@@ -355,6 +376,7 @@ async def tavily_search(args: dict) -> dict:
     if not query:
         return _msg("tavily_search requires a non-empty 'query'.")
     domains = _domains_for(args.get("source"))
+    time_period_days = args.get("time_period_days", DEFAULT_RECENCY_DAYS)
 
     payload = {
         "api_key": api_key,
@@ -362,7 +384,7 @@ async def tavily_search(args: dict) -> dict:
         "search_depth": "advanced",
         "max_results": TAVILY_NUM_RESULTS,
         "include_domains": domains,
-        "days": RECENCY_DAYS,
+        "days": time_period_days,
         "topic": "general",
         "include_raw_content": True,
     }
@@ -392,7 +414,7 @@ async def tavily_search(args: dict) -> dict:
                 "raw_content": r.get("raw_content"),
             }
         )
-    results = [_enrich_result(r, trust_search_recency=True) for r in results]
+    results = [_enrich_result(r, recency_days=time_period_days, trust_search_recency=True) for r in results]
     return _ok({"provider": "tavily", "domains": domains, "count": len(results), "results": results})
 
 

@@ -1,11 +1,13 @@
 import os
 import json
 import asyncio
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends
+from collections import deque
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import logfire
 import sys
 
 sys.path.append(os.path.dirname(__file__))
@@ -20,50 +22,45 @@ from db import (
 )
 from auth import init_auth_db, router as auth_router, get_current_user
 from resume import init_resume_db, router as resume_router
-from applications import router as applications_router
-from bookmarks import router as bookmarks_router
-from searches import router as searches_router
-from salary import router as salary_router
-from skills import router as skills_router
-from scoring import router as scoring_router, init_scoring_db
-from cover_letters import router as cover_letters_router, init_cover_letter_db
-from interviews import router as interviews_router, init_interview_db
-from comparison import router as comparison_router
-from analytics import router as analytics_router, init_analytics_db
-from email_service import router as email_router
-from webhooks import router as webhooks_router, init_webhooks_db
-from integrations import router as integrations_router, init_integrations_db
 from rate_limit import enforce_rate_limit, RateLimitConfig
 
 # Initialize database schema
 init_db()
 init_auth_db()
 init_resume_db()
-init_scoring_db()
-init_cover_letter_db()
-init_interview_db()
-init_analytics_db()
-init_webhooks_db()
-init_integrations_db()
 
-app = FastAPI(title="Job Finder Backend")
+app = FastAPI(
+    title="Job Finder Backend",
+    description=(
+        "Autonomous job-finder agent + REST/SSE API.\n\n"
+        "**Authentication:** most endpoints require a bearer token. Click the "
+        "**Authorize** button and sign in with the seeded test account — "
+        "`username: test@test.com`, `password: testtest` — to exercise the "
+        "protected endpoints directly from this page. The Authorize dialog posts "
+        "to `/api/token` and attaches the returned token to every request."
+    ),
+)
 
-# All routers
+# Observability — Pydantic Logfire. Sends only when credentials exist: the local
+# .logfire/ credentials file (from `logfire auth` + `logfire projects use`) or a
+# LOGFIRE_TOKEN env var/secret in prod. Without either, telemetry is a no-op so
+# the app still boots (tests, fresh clones, CI).
+logfire.configure(
+    service_name="job-finder-backend",
+    send_to_logfire="if-token-present" if not os.path.exists(
+        os.path.join(os.path.dirname(__file__), "..", ".logfire", "logfire_credentials.json")
+    ) else True,
+)
+logfire.instrument_fastapi(app, capture_headers=False)
+logfire.instrument_system_metrics()
+# Traces any direct anthropic-client calls. Note: the job agent + resume optimizer
+# go through the Claude Agent SDK (spawned `claude` CLI subprocess), which this
+# does NOT capture — only in-process `anthropic.Anthropic()` usage.
+logfire.instrument_anthropic()
+
+# Core routers (job search, auth, resume)
 app.include_router(auth_router)
 app.include_router(resume_router)
-app.include_router(applications_router)
-app.include_router(bookmarks_router)
-app.include_router(searches_router)
-app.include_router(salary_router)
-app.include_router(skills_router)
-app.include_router(scoring_router)
-app.include_router(cover_letters_router)
-app.include_router(interviews_router)
-app.include_router(comparison_router)
-app.include_router(analytics_router)
-app.include_router(email_router)
-app.include_router(webhooks_router)
-app.include_router(integrations_router)
 
 # CORS middleware for local development
 app.add_middleware(
@@ -77,17 +74,30 @@ app.add_middleware(
 # Backend state variables
 agent_status = {"status": "idle", "query": None, "session_id": None}
 log_queues = []
+LOG_HISTORY_MAX = 1500
+# Per-client SSE queue bound. A healthy client drains far faster than the agent
+# emits, so this only bites when a connection has stalled — where the oldest
+# lines are dropped for that client instead of buffering the whole run in RAM.
+LOG_QUEUE_MAX = LOG_HISTORY_MAX
 # In-memory buffer of the current run's log lines so a client that reconnects
 # (e.g. after a browser refresh) can replay what was already emitted. Bounded to
 # cap memory; the run itself is in-memory, so surviving a browser refresh — not a
-# server restart — is the intended scope.
-log_history: list[str] = []
-LOG_HISTORY_MAX = 1500
+# server restart — is the intended scope. Uses deque with maxlen for efficient append.
+# Entries are (seq, msg) tuples so reconnecting clients can resume from the last
+# line they saw (SSE Last-Event-ID) instead of re-dumping the whole buffer.
+log_history: deque = deque(maxlen=LOG_HISTORY_MAX)
+# Monotonic, never-reset sequence id stamped on every published log line. It powers
+# SSE resume: an EventSource that drops (platform request-duration cap, proxy blip)
+# reconnects with Last-Event-ID = the last seq it received, and the stream replays
+# ONLY lines with a greater seq — so a reconnect is seamless (no duplicated lines,
+# no console reset). Kept monotonic ACROSS runs on purpose: a client holding a stale
+# id from a prior run still gets the new run's (higher-seq) lines.
+log_seq = 0
 
 
 class PullRequest(BaseModel):
-    # Optional: the agent always searches the default Principal roles; a non-empty
-    # query is added as an extra role on top of those defaults.
+    # The Search Target role from Agent Controls — the ONLY role searched. If empty,
+    # the agent falls back to the default Principal roles in agent.py.
     query: str = ""
     # Job type filters: which types of jobs to search for
     job_types: list[str] = ["fulltime", "remote"]
@@ -97,14 +107,24 @@ class PullRequest(BaseModel):
 
 async def publish_log(msg: str):
     """Broadcasts a log message to all active stream connections and buffers it so
-    reconnecting clients can replay the current run's history."""
+    reconnecting clients can replay the current run's history. Deque automatically
+    evicts oldest entries when maxlen is exceeded."""
+    global log_seq
     print(msg, flush=True)
-    log_history.append(msg)
-    if len(log_history) > LOG_HISTORY_MAX:
-        del log_history[: len(log_history) - LOG_HISTORY_MAX]
+    log_seq += 1
+    item = (log_seq, msg)
+    log_history.append(item)
     for q in list(log_queues):
         try:
-            await q.put(msg)
+            q.put_nowait(item)
+        except asyncio.QueueFull:
+            # Stalled client: evict its oldest line to make room, never block
+            # the agent run on a slow consumer.
+            try:
+                q.get_nowait()
+                q.put_nowait(item)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -117,6 +137,7 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
     import uuid
 
     try:
+        total_jobs_count = 0
 
         async def log_callback(thought: str):
             await publish_log(thought)
@@ -124,6 +145,7 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
         async def batch_callback(jobs_batch):
             """Persist a scout's batch of jobs the moment it finishes, so the UI fills
             in incrementally instead of waiting for the whole agent run to complete."""
+            nonlocal total_jobs_count
             inserted = 0
             for job in jobs_batch:
                 job_dict = (
@@ -136,9 +158,10 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
                         inserted += 1
                 except Exception:
                     pass
+            total_jobs_count += inserted
             await publish_log(
                 f"\n[Backend] Saved a batch of {len(jobs_batch)} jobs "
-                f"({inserted} new). Database now holds {len(get_user_jobs(user_id))} total jobs.\n"
+                f"({inserted} new). Database now holds {total_jobs_count} total jobs.\n"
             )
 
         # Initialize a new session ID every time to prevent corrupted resume states
@@ -362,33 +385,68 @@ async def pull_jobs(req: PullRequest, background_tasks: BackgroundTasks, user: d
 
 
 @app.get("/api/stream")
-async def stream_logs():
-    """Server-Sent Events (SSE) endpoint to stream agent thought logs in real time."""
+async def stream_logs(request: Request, last_event_id: str | None = None):
+    """Server-Sent Events (SSE) endpoint to stream agent thought logs in real time.
+
+    Resumable: a reconnecting client tells us the last line it saw so we replay ONLY
+    newer ones (no duplicates, no console reset). Native EventSource auto-reconnects
+    send that via the ``Last-Event-ID`` header; our manual reconnect passes it as the
+    ``last_event_id`` query param. The header is authoritative when present (it's the
+    freshest on a native reconnect); the query param seeds the very first open.
+    """
+    resume_raw = request.headers.get("last-event-id") or last_event_id
+    try:
+        resume_seq = int(resume_raw) if resume_raw else 0
+    except (TypeError, ValueError):
+        resume_seq = 0
 
     async def event_generator():
-        q = asyncio.Queue()
+        q = asyncio.Queue(maxsize=LOG_QUEUE_MAX)
         # Snapshot history and register the live queue with NO await between them:
         # both are synchronous, so in single-threaded asyncio no other coroutine can
         # publish in the gap — the replay contains no lost or duplicated lines.
         history_snapshot = list(log_history)
         log_queues.append(q)
         try:
-            # Yield initial status message
-            yield f"data: {json.dumps({'message': '[Connection Established] Connected to agent logs stream.'})}\n\n"
-            # Replay the current run's buffered logs so a reconnecting client (e.g. after
-            # a page refresh) sees everything emitted before it connected.
-            for msg in history_snapshot:
-                yield f"data: {json.dumps({'message': msg})}\n\n"
+            # Comment line (ignored by EventSource) just to open the stream promptly.
+            yield ": connected\n\n"
+            # Replay the current run's buffered logs the client hasn't seen yet, so a
+            # reconnect (page refresh, dropped connection) repopulates seamlessly.
+            for seq, msg in history_snapshot:
+                if seq <= resume_seq:
+                    continue
+                yield f"id: {seq}\ndata: {json.dumps({'message': msg})}\n\n"
             while True:
-                msg = await q.get()
-                yield f"data: {json.dumps({'message': msg})}\n\n"
+                # Wait for the next log line, but never sit silent for long: proxies and
+                # load balancers idle-close quiet connections, which showed up as the UI
+                # "disconnecting" mid-run. An SSE comment line (": keep-alive") is ignored
+                # by EventSource but keeps the connection alive through intermediaries.
+                try:
+                    seq, msg = await asyncio.wait_for(q.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                if seq <= resume_seq:
+                    continue
+                yield f"id: {seq}\ndata: {json.dumps({'message': msg})}\n\n"
         except asyncio.CancelledError:
             pass
         finally:
             if q in log_queues:
                 log_queues.remove(q)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            # Defeat proxy/CDN buffering so lines (and keep-alives) reach the browser
+            # immediately; without these, intermediaries buffer the stream and the
+            # connection looks dead until it's idle-closed.
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # Serve React frontend build files in production (look in the parent directory)

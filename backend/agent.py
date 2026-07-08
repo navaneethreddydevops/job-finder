@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import logfire
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
@@ -36,62 +37,46 @@ os.environ.pop("ANTHROPIC_API_KEY", None)
 os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 
-# Full toolset granted to the orchestrator (see the Claude Agent SDK overview:
+# Essential tools for the orchestrator (see the Claude Agent SDK overview:
 # https://code.claude.com/docs/en/agent-sdk/overview). Job discovery is done primarily via
-# the Exa + Tavily search tools (in-process SDK MCP server `jobsearch`), with the built-in
-# WebSearch/WebFetch as a fallback, plus file I/O and system tools for processing/merging.
+# the Exa + Tavily search tools (in-process SDK MCP server `jobsearch`), with WebFetch
+# as fallback for verifying individual listings.
 AGENT_ALLOWED_TOOLS = [
-    # File and text operations
-    "Read",
-    "Write",
-    "Edit",
-    # System operations
-    "Bash",
-    "Glob",
-    "Grep",
     # Job search APIs (Exa + Tavily, via the in-process `jobsearch` MCP server)
     EXA_TOOL,
     TAVILY_TOOL,
-    # Web operations (fallback / reading individual listings)
-    "WebSearch",
+    # Web operations (fallback verification only)
     "WebFetch",
     # Agent control
     "Task",  # spawns the job_scout subagent (fan-out)
-    "TodoWrite",
 ]
 
 # Tools granted to the job_scout subagent. NOTE: in-process SDK MCP tools (exa/tavily)
 # CANNOT be granted to subagents — `AgentDefinition.mcpServers` is JSON-serialized for the
-# CLI and a live in-process server isn't serializable. So scouts verify/extract candidate
-# URLs (supplied by the orchestrator) using WebFetch; the orchestrator does the Exa/Tavily
-# searching itself.
+# CLI and a live in-process server isn't serializable. Scouts format JSON only; they don't
+# need file I/O or system operations.
 SCOUT_ALLOWED_TOOLS = [
-    # File and text operations
-    "Read",
-    "Write",
-    "Edit",
-    # System operations
-    "Bash",
-    "Glob",
-    "Grep",
-    # Web operations — open candidate listings and verify them
+    # Web operations — fallback verification if needed
     "WebFetch",
     "WebSearch",
-    # Task tracking
-    "TodoWrite",
 ]
 
 
-# Target roles that are ALWAYS searched on every run, regardless of the typed query.
-# These are remote, full-time, Principal-level platform/infra roles.
-# Reduced to 2 roles to avoid Claude API rate limits (4 roles = 8+ agent calls, too aggressive).
+# Fallback roles, used ONLY when the user submits an empty Search Target. When the user
+# types a query in Agent Controls, that query is the ONLY role searched — these defaults
+# are never added on top of it.
 DEFAULT_ROLES = [
     "Principal DevOps Engineer",
     "Principal Cloud Engineer",
+    "Principal Kubernetes Engineer",
+    "Principal Site Reliability Engineer",
 ]
 
-# The only two sources the agent searches. "pull" fans subagents out across these.
-SEARCH_SOURCES = ["LinkedIn", "Workday"]
+# The only sources the agent searches. LinkedIn + the ATS-hosted company careers portals
+# (Workday, Greenhouse, Lever, Ashby) — all direct employer postings with reliable dates.
+# Aggregator boards (Indeed, Glassdoor, Dice, Monster, ZipRecruiter) stay banned: stale
+# reposts, scrape-hostile, unreliable dates.
+SEARCH_SOURCES = ["LinkedIn", "Workday", "Greenhouse", "Lever", "Ashby"]
 
 
 # Pydantic Schemas for Structured Output
@@ -118,7 +103,7 @@ class JobItem(BaseModel):
         None, description="Recruiter or contact phone number if available"
     )
     source: str = Field(
-        description="Source website/portal: one of 'Workday' or 'LinkedIn'."
+        description="Source website/portal: one of 'LinkedIn', 'Workday', 'Greenhouse', 'Lever', or 'Ashby'."
     )
     description: str = Field(
         description="Short summary of the job description, responsibilities, and other details"
@@ -204,15 +189,55 @@ async def run_job_finder_agent(
     job_types: list[str] = None,
     time_period_days: int = 7,
 ):
+    """Logfire-traced wrapper around the agent run (see `_run_job_finder_agent`).
+
+    The Agent SDK spawns the `claude` CLI as a subprocess, so Logfire's
+    `instrument_anthropic()` can't see these calls — instead the whole run is a
+    manual span, with tool calls / scout batches / final usage recorded as events
+    inside it (emitted from the message-stream loop below).
+    """
+    with logfire.span(
+        "job_finder_agent run",
+        query=query,
+        user_id=user_id,
+        job_types=job_types or ["fulltime", "remote"],
+        time_period_days=time_period_days,
+        is_resume=is_resume,
+    ) as span:
+        data = await _run_job_finder_agent(
+            query=query,
+            user_id=user_id,
+            log_callback=log_callback,
+            session_id=session_id,
+            is_resume=is_resume,
+            batch_callback=batch_callback,
+            job_types=job_types,
+            time_period_days=time_period_days,
+        )
+        jobs = data.get("jobs") if isinstance(data, dict) else None
+        span.set_attribute("jobs_found", len(jobs) if isinstance(jobs, list) else 0)
+        return data
+
+
+async def _run_job_finder_agent(
+    query: str = "",
+    user_id: int = None,
+    log_callback=None,
+    session_id=None,
+    is_resume=False,
+    batch_callback=None,
+    job_types: list[str] = None,
+    time_period_days: int = 7,
+):
     """Initializes and executes the job finder agent using the claude-agent-sdk.
 
-    The agent ALWAYS researches the DEFAULT_ROLES (remote, full-time, last 7 days) across
-    LinkedIn and Workday careers. A non-empty `query` is added as an extra role to search
-    on top of the defaults.
+    The agent researches the user's Search Target `query` across the SEARCH_SOURCES
+    (LinkedIn plus the Workday/Greenhouse/Lever/Ashby careers portals). Only when the
+    query is empty does it fall back to the DEFAULT_ROLES.
 
     Args:
-        query: Optional extra search role/term, e.g. "Staff Platform Engineer". The four
-            DEFAULT_ROLES are always searched regardless of this value.
+        query: The search role/term from Agent Controls, e.g. "Staff Platform Engineer".
+            This is the only role searched; DEFAULT_ROLES are a fallback for an empty query.
         user_id: The ID of the user running the search (for multi-tenant data isolation)
         log_callback: Async function to stream thoughts/logs to (receives strings)
         session_id: A valid UUID string.
@@ -237,13 +262,12 @@ async def run_job_finder_agent(
     run_date = now.strftime("%Y-%m-%d")
     since_date = (now - timedelta(days=time_period_days)).strftime("%Y-%m-%d")
 
-    # Always search the default Principal roles; add the typed query as an extra role.
-    roles = list(DEFAULT_ROLES)
+    # Search ONLY the user's Search Target query; the hardcoded DEFAULT_ROLES are used
+    # solely as a fallback when no query was typed.
     q = (query or "").strip()
-    if q and q.lower() not in [r.lower() for r in roles]:
-        roles.append(q)
+    roles = [q] if q else list(DEFAULT_ROLES)
     roles_text = "; ".join(roles)
-    sources_text = " and ".join(SEARCH_SOURCES)
+    sources_text = ", ".join(SEARCH_SOURCES)
 
     job_types_text = ", ".join(job_types)
     if log_callback:
@@ -252,21 +276,30 @@ async def run_job_finder_agent(
             f"(job types: {job_types_text}; sources: {sources_text}; posted in last {time_period_days} days)...\n"
         )
 
+    # Format job types for search queries (needed by the scout definition below).
+    job_type_str = " ".join(job_types) if job_types else "fulltime remote"
+
     # Subagent used to parallelize VERIFICATION/EXTRACTION. The orchestrator does the Exa +
     # Tavily searching itself (in-process tools only work on the main agent), then hands each
-    # scout a BATCH of candidate listings to open, verify, and extract — in parallel.
+    # scout a BATCH of candidate listings to format — in parallel.
     job_scout = AgentDefinition(
         description=(
-            "Given a batch of ALREADY-VERIFIED candidate job postings (remote/full-time/last-7-days "
-            "already determined by the search tools), formats each into a structured JobItem. Used "
-            "for parallel formatting/extraction across a large candidate pool."
+            "Verifies and formats a batch of candidate job postings into the final JSON "
+            "schema. Pass it pre-annotated candidates; it returns ONLY a JSON array of job objects."
         ),
         prompt=(
-            "Format job batch: keep if posted_within_7d=true/null (trust search tools, don't re-verify).\n"
-            "Drop if: posted_within_7d=false OR remote=false OR full_time=false.\n"
-            "For each kept job: title, company, location='Remote', url, date_posted, posted_within_7d, "
-            "key_requirements, contact_email, contact_phone, source, description.\n"
-            "Return ONLY JSON array — no commentary."
+            f"You verify and format candidate job postings ({job_type_str}) found between "
+            f"{since_date} and {run_date}.\n"
+            "KEEP a candidate when: posted_within_7d is true or null (null means the search "
+            "was already time-filtered at the source), remote is not false, and full_time is "
+            "not false. DROP contract, temporary, internship, part-time, and onsite/hybrid "
+            "roles. For borderline candidates, KEEP them — dropping a real job is worse than "
+            "including a borderline one.\n"
+            "For each kept job output: title, company, location='Remote', url, date_posted, "
+            "posted_within_7d (true unless the date is clearly older than the window), "
+            "key_requirements (list of skills), contact_email, contact_phone, source (one of "
+            "'LinkedIn', 'Workday', 'Greenhouse', 'Lever', 'Ashby'), description (2-3 sentences).\n"
+            "Return ONLY a JSON array [{...}, {...}] — every kept job, no prose, no markdown fence."
         ),
         model="claude-sonnet-5",
         tools=SCOUT_ALLOWED_TOOLS,
@@ -275,17 +308,8 @@ async def run_job_finder_agent(
     # Agent config
     import uuid
 
-    # Build dynamic system prompt based on selected job types
-    job_type_constraints = []
-    if "remote" in job_types:
-        job_type_constraints.append("remote=true/null")
-    if "fulltime" in job_types:
-        job_type_constraints.append("full_time=true/null")
-    if "contract" in job_types:
-        job_type_constraints.append("contract=true/null")
-    constraints_text = ", ".join(job_type_constraints) if job_type_constraints else "remote=true/null, full_time=true/null"
-
     effective_session_id = session_id or str(uuid.uuid4())
+
     options = ClaudeAgentOptions(
         session_id=effective_session_id if not is_resume else None,
         resume=effective_session_id if is_resume else None,
@@ -293,19 +317,11 @@ async def run_job_finder_agent(
         agents={"job_scout": job_scout},
         allowed_tools=AGENT_ALLOWED_TOOLS,
         mcp_servers={JOB_SEARCH_SERVER_NAME: job_search_server},
+        # 4-5 roles x 5 sources x 2 search tools ≈ 40-50 search calls plus parallel scout
+        # batches — 80 turns starved the wider fan-out and cut runs off mid-search.
         max_turns=150,
         output_format=JobList.model_json_schema(),
         permission_mode="bypassPermissions",
-        system_prompt=(
-            f"Job Finder: Find jobs from last {time_period_days} days only. Keep it simple.\n"
-            "1. Search exa_search + tavily_search for each role on LinkedIn and Workday.\n"
-            f"2. Filter: {constraints_text}, posted_within_{time_period_days}d=true/null.\n"
-            "3. Batch candidates (30-40) and spawn job_scout subagents SEQUENTIALLY to format.\n"
-            "4. Return JSON: {\"jobs\": [...]} with only valid jobs.\n"
-            "Tools: exa_search, tavily_search for LinkedIn/Workday only. Fall back to WebSearch if rate limited.\n"
-            "Sources: LinkedIn + Workday only. No Glassdoor/Indeed/etc.\n"
-            f"Constraints: {constraints_text}, posted_within_{time_period_days}d=true ONLY."
-        ),
     )
 
     if log_callback:
@@ -315,17 +331,37 @@ async def run_job_finder_agent(
         await log_callback(f"[Debug] Options model: {options.model}\n")
 
     roles_list = ", ".join(roles)
+    # Keyword string for search queries: job types + "remote", de-duplicated in order
+    # (job_type_str usually already contains "remote").
+    query_keywords = " ".join(dict.fromkeys(f"{job_type_str} remote".split()))
     prompt = (
-        f"Run date: {run_date}. Keep only jobs from {since_date} onward ({time_period_days} days).\n"
-        f"Roles: {roles_list}\n"
-        f"Sources: LinkedIn + Workday only.\n"
-        f"Job types to find: {', '.join(job_types)}.\n\n"
-        f"STEPS:\n"
-        f"1. Search: for each role, call exa_search + tavily_search on LinkedIn, then Workday. ({len(roles)*4} calls)\n"
-        f"2. Filter: keep posted_within_{time_period_days}d=true/null, and match selected job types.\n"
-        f"3. Batch (~30-40 each) and spawn job_scout agents SEQUENTIALLY.\n"
-        f"4. Merge results, de-dupe by URL.\n\n"
-        f"Return ONLY: ```json\n{{\n\"jobs\": [...]\n}}\n```"
+        f"Find as many {job_type_str} jobs as possible posted between {since_date} and "
+        f"{run_date} (last {time_period_days} days). There is NO upper limit on job count — "
+        f"more is strictly better. Do not stop early or settle for a sample; exhaust every "
+        f"role x source combination below before finishing.\n\n"
+        f"Roles (search ALL of them): {roles_list}\n"
+        f"Sources (search ALL of them): {sources_text}. Nothing else — never Indeed, "
+        f"Glassdoor, Dice, Monster, or ZipRecruiter.\n\n"
+        f"For EVERY role x source pair, run BOTH search tools (they return different results; "
+        f"skipping one loses jobs):\n"
+        f"1. exa_search(query='<role> {query_keywords}', source='<source>', "
+        f"time_period_days={time_period_days})\n"
+        f"2. tavily_search(query='<role> {query_keywords}', source='<source>', "
+        f"time_period_days={time_period_days})\n"
+        f"3. If a pair returned fewer than 5 candidates, retry ONCE with a broader query "
+        f"variation (drop the seniority qualifier — e.g. 'Principal'/'Senior'/'Staff' — or "
+        f"use a close synonym of the role title), then move on.\n"
+        f"4. Keep candidates where posted_within_7d is true or null, remote is not false, "
+        f"and full_time is not false. When a field is null, keep the candidate — the scout "
+        f"verifies borderline cases.\n"
+        f"5. As soon as you have 30-40 kept candidates, spawn a job_scout to verify + format "
+        f"that batch, and run multiple scouts IN PARALLEL while you keep searching. Pass each "
+        f"scout the full candidate data including the remote/full_time/posted_within_7d "
+        f"annotations and the source name.\n"
+        f"6. Merge all scout outputs, de-duplicate by URL only (same role at different "
+        f"companies is NOT a duplicate), and return the COMPLETE merged list — never "
+        f"truncate or summarize it.\n\n"
+        f'Return ONLY a JSON object of the form {{"jobs": [ ... ]}} with every job found.'
     )
 
     async with ClaudeSDKClient(options) as client:
@@ -370,6 +406,11 @@ async def run_job_finder_agent(
                         # runs — a real bug, previously masked because it "fails safe").
                         if block.name == "Agent":
                             scout_task_ids.add(block.id)
+                        logfire.info(
+                            "agent tool call: {tool}",
+                            tool=block.name,
+                            tool_input=block.input,
+                        )
                         if log_callback:
                             tool_msg = f"\n[Tool Call] Running tool '{block.name}' with arguments: {block.input}\n"
                             await log_callback(tool_msg)
@@ -392,6 +433,10 @@ async def run_job_finder_agent(
                         )
                         if batch:
                             _remember(batch)
+                            logfire.info(
+                                "job_scout batch: {job_count} jobs",
+                                job_count=len(batch),
+                            )
                         if batch and batch_callback:
                             try:
                                 await batch_callback(batch)
@@ -403,6 +448,15 @@ async def run_job_finder_agent(
 
             # When the generator completes the task, it outputs a ResultMessage
             if isinstance(msg, ResultMessage):
+                logfire.info(
+                    "agent run result",
+                    is_error=msg.is_error,
+                    num_turns=getattr(msg, "num_turns", None),
+                    duration_ms=getattr(msg, "duration_ms", None),
+                    duration_api_ms=getattr(msg, "duration_api_ms", None),
+                    total_cost_usd=getattr(msg, "total_cost_usd", None),
+                    usage=getattr(msg, "usage", None),
+                )
                 if msg.is_error:
                     error_detail = msg.errors if msg.errors else msg.result
                     if log_callback:

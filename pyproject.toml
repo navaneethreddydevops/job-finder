@@ -6,13 +6,15 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.9.0",
+    "anthropic>=0.116.0",
     "claude-agent-sdk>=0.2.101",
-    "fastapi[standard]>=0.137.0",
-    # FastAPI Cloud instruments the app with OpenTelemetry at deploy time;
-    # versions before 0.64b0 crash with AttributeError('_IncludedRouter') on
-    # OPTIONS/CORS-preflight requests to include_router() routes under
-    # FastAPI >= 0.137, which breaks login from the Vercel frontend.
-    "opentelemetry-instrumentation-fastapi>=0.64b0",
+    # <0.137: FastAPI 0.137 introduced _IncludedRouter, which the OpenTelemetry
+    # FastAPI instrumentation <=0.63b1 crashes on (AttributeError on OPTIONS/
+    # CORS-preflight to include_router() routes — broke login from Vercel).
+    # The fixed instrumentation (0.64b0) needs opentelemetry-sdk 1.43, which
+    # logfire caps below, so stay on FastAPI 0.136 until logfire allows it.
+    "fastapi[standard]>=0.116.0,<0.137",
+    "logfire[fastapi,system-metrics]>=4.37.0",
     "psycopg[binary]>=3.2.0",
     "python-docx>=1.1.2",
     "python-dotenv>=1.2.2",

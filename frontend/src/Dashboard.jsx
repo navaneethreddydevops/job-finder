@@ -35,6 +35,10 @@ import { Heart } from 'lucide-react';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+// Max agent-console lines kept in state. Mirrors the backend's LOG_HISTORY_MAX
+// (backend/main.py) so the live view and a post-refresh replay show the same tail.
+const LOG_LINES_MAX = 1500;
+
 function timeAgo(isoStr) {
   if (!isoStr) return null;
   const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
@@ -125,6 +129,10 @@ function Dashboard() {
 
   const consoleEndRef = useRef(null);
   const eventSourceRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  // Last SSE event id we received, so a reconnect resumes from there (the backend
+  // replays only newer lines — no duplicated console output, no reset flash).
+  const lastEventIdRef = useRef('');
   const dialogRef = useRef(null);
   const lastFocusRef = useRef(null);
   const stateRef = useRef({});
@@ -257,20 +265,65 @@ function Dashboard() {
     }
   };
 
+  // If the SSE connection drops mid-run (proxy timeout, network blip), retry after a
+  // short delay instead of leaving the console dead. The backend replays the whole
+  // run's log buffer on reconnect, so the console is reset first to avoid duplicates.
+  const scheduleReconnect = () => {
+    if (reconnectTimerRef.current) return; // a retry is already pending
+    reconnectTimerRef.current = setTimeout(async () => {
+      reconnectTimerRef.current = null;
+      try {
+        const resp = await fetch(apiUrl('/api/status'));
+        if (resp.ok) {
+          const data = await resp.json();
+          setStatus(data);
+          if (data.status === 'running') {
+            // Resume from the last id we saw (startStreaming reads lastEventIdRef),
+            // so the backend replays only new lines — the console is NOT cleared.
+            startStreaming();
+          }
+          // idle: the run finished while we were disconnected — the status-polling
+          // effect notices and does the final fetchJobs(); nothing to reconnect to.
+          return;
+        }
+      } catch { /* backend unreachable — fall through and retry */ }
+      scheduleReconnect();
+    }, 2000);
+  };
+
   const startStreaming = () => {
     if (eventSourceRef.current) eventSourceRef.current.close();
-    const es = new EventSource(apiUrl('/api/stream'));
+    // Resume from the last line we saw so a reconnect (platform request-duration cap,
+    // proxy blip, refresh) replays only newer lines instead of re-dumping the buffer.
+    // Native EventSource reconnects send this via the Last-Event-ID header; for our
+    // first/manual open we pass it as a query param (EventSource can't set headers).
+    const resume = lastEventIdRef.current;
+    const url = apiUrl('/api/stream') + (resume ? `?last_event_id=${encodeURIComponent(resume)}` : '');
+    const es = new EventSource(url);
     eventSourceRef.current = es;
     es.onmessage = (event) => {
+      if (event.lastEventId) lastEventIdRef.current = event.lastEventId;
       try {
         const data = JSON.parse(event.data);
-        setLogs(prev => [...prev, data.message]);
+        // Cap the console scrollback to match the backend's LOG_HISTORY_MAX replay
+        // buffer, so a long agent run can't grow browser memory/DOM without bound.
+        setLogs(prev => (prev.length >= LOG_LINES_MAX
+          ? [...prev.slice(prev.length - LOG_LINES_MAX + 1), data.message]
+          : [...prev, data.message]));
         if (typeof data.message === 'string' && data.message.includes('Database now holds')) {
           fetchJobs();
         }
       } catch (err) { console.error('Failed to parse log message:', err); }
     };
-    es.onerror = () => { console.log('SSE closed'); es.close(); };
+    es.onerror = () => {
+      // A transient drop leaves readyState CONNECTING — let the browser's native
+      // reconnect resume it (it re-sends Last-Event-ID, so no flash). Only when the
+      // browser gives up (CLOSED — e.g. a fatal/CORS error) do we retry manually.
+      if (es.readyState === EventSource.CLOSED) {
+        console.log('SSE permanently closed — scheduling manual reconnect');
+        scheduleReconnect();
+      }
+    };
   };
 
   const handlePullJobs = async (e) => {
@@ -356,7 +409,13 @@ function Dashboard() {
     };
     checkAgentStatus();
 
-    return () => { if (eventSourceRef.current) eventSourceRef.current.close(); };
+    return () => {
+      if (eventSourceRef.current) eventSourceRef.current.close();
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+    };
   }, []);
 
   // health check
@@ -394,6 +453,13 @@ function Dashboard() {
               clearInterval(interval);
               fetchJobs();
               if (eventSourceRef.current) eventSourceRef.current.close();
+            } else if (
+              !eventSourceRef.current ||
+              eventSourceRef.current.readyState === EventSource.CLOSED
+            ) {
+              // Backstop: still running but the stream is down — reconnect (de-duped
+              // against onerror's own retry by the shared timer ref).
+              scheduleReconnect();
             }
           }
         } catch (err) { console.error('Failed polling status:', err); }

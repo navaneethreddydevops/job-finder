@@ -15,6 +15,7 @@ import secrets
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 
 from db import get_db_connection, insert_returning_id, ensure_users_table
@@ -153,10 +154,24 @@ def _user_id_for_token(token: str):
 # ---------------------------------------------------------------------------
 # FastAPI dependency
 # ---------------------------------------------------------------------------
-def get_current_user(authorization: str = Header(None)) -> dict:
-    if not authorization or not authorization.lower().startswith("bearer "):
+# OAuth2 password flow, wired only so Swagger UI renders an "Authorize" button
+# and a username/password form (use the seeded test credentials below). The
+# actual token is still our own bearer token from /api/token (or /api/login).
+# auto_error=False so we raise our own 401 and still honor a raw Authorization
+# header from the frontend, which sends "Authorization: Bearer <token>".
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/token", auto_error=False)
+
+
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    authorization: str = Header(None),
+) -> dict:
+    # Prefer the token extracted by the OAuth2 scheme (Swagger Authorize button);
+    # fall back to parsing the raw Authorization header for any other client.
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    token = authorization.split(" ", 1)[1].strip()
     user_id = _user_id_for_token(token)
     if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -226,6 +241,27 @@ async def login(req: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     token = _issue_token(row["id"])
     return {"token": token, "user": _row_to_user(row)}
+
+
+@router.post("/token")
+async def token(form_data: OAuth2PasswordRequestForm = Depends()):
+    """OAuth2 password-flow token endpoint used by Swagger UI's *Authorize* button.
+
+    The `username` field is the account email. Use the seeded test credentials
+    (``test@test.com`` / ``testtest``) to try out the protected endpoints from
+    ``/docs``. Returns the same bearer token as ``/api/login``.
+    """
+    row = get_user_by_email(form_data.username)
+    if row is None or not _verify_password(
+        form_data.password, row["salt"], row["password_hash"]
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token = _issue_token(row["id"])
+    return {"access_token": access_token, "token_type": "bearer"}
 
 
 @router.post("/logout")

@@ -11,11 +11,13 @@ It is the source of truth for the work and should be kept in sync with the code.
 Reference: https://code.claude.com/docs/en/agent-sdk/overview
 
 The job-finder orchestrator (`backend/agent.py`) researches **remote, full-time** jobs across exactly
-two sources: **LinkedIn (`linkedin.com/jobs`) and Workday-hosted careers portals
-(`*.myworkdayjobs.com`)** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter). It always searches a fixed
-set of Principal-level roles (`DEFAULT_ROLES`: DevOps, Cloud, Kubernetes, SRE) plus any extra typed
-query, keeping only postings from the **last 7 days**, and fans out one `job_scout` subagent per
-role × source. The agent is granted the **full built-in toolset** (no MCP integration), with behavior
+five sources: **LinkedIn (`linkedin.com/jobs`) and the ATS-hosted careers portals Workday
+(`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever
+(`jobs.lever.co`), and Ashby (`jobs.ashbyhq.com`)** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter —
+aggregator boards are banned). It searches the user's typed
+query as the only role (`DEFAULT_ROLES` — Principal DevOps, Cloud, Kubernetes, SRE — are a fallback
+used only when the query is empty), keeping only postings from the **last 7 days**; the orchestrator runs the searches itself and
+hands batches of candidates to parallel `job_scout` subagents for verification and formatting. The agent is granted the **full built-in toolset** (no MCP integration), with behavior
 intentional and documented.
 
 **Built-in tools granted to orchestrator** (per the Agent SDK overview):
@@ -80,12 +82,22 @@ No external crypto deps — uses stdlib `hashlib.pbkdf2_hmac` + `secrets` + `hma
 | ------ | ----------------------- | ---- | ------------- |
 | POST   | `/api/register`         | no   | `{email, password, full_name?, phone?}` → `{token, user}` |
 | POST   | `/api/login`            | no   | `{email, password}` → `{token, user}` |
+| POST   | `/api/token`            | no   | OAuth2 password form (`username`=email, `password`) → `{access_token, token_type}` — powers Swagger's **Authorize** button |
 | POST   | `/api/logout`           | yes  | invalidates the token |
 | GET    | `/api/me`               | yes  | `{user}` |
 | PATCH  | `/api/profile`          | yes  | `{full_name?, phone?, email?}` → `{user}` |
 | POST   | `/api/change-password`  | yes  | `{current_password, new_password}` → `{success}` |
 
 Validation: email must look like an email; password `len >= 8`. Errors return 400/401.
+
+### Swagger / OpenAPI docs auth
+Protected routes declare an `OAuth2PasswordBearer` security scheme (`tokenUrl=api/token`),
+so `/docs` renders an **Authorize** button and a username/password form. Sign in there with
+the seeded test account (`test@test.com` / `testtest`) to call protected endpoints from the
+docs page. The scheme is wired with `auto_error=False`; `get_current_user` prefers the token
+it extracts but still falls back to parsing a raw `Authorization: Bearer <token>` header, so
+the frontend's existing `apiFetch` calls are unaffected. The FastAPI app `description` also
+spells out the test credentials so they're visible at the top of `/docs`.
 
 ### Frontend
 - React Router routes: `/login`, `/register`, `/profile`.
