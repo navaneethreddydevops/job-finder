@@ -12,6 +12,7 @@ import sys
 
 sys.path.append(os.path.dirname(__file__))
 from agent import run_job_finder_agent
+from search_tools import add_known_urls
 from db import (
     init_db,
     save_job,
@@ -19,6 +20,8 @@ from db import (
     toggle_applied,
     delete_user_jobs,
     get_application_stats,
+    get_pull_checkpoint,
+    upsert_pull_checkpoint,
 )
 from auth import init_auth_db, router as auth_router, get_current_user
 from resume import init_resume_db, router as resume_router
@@ -129,8 +132,31 @@ async def publish_log(msg: str):
             pass
 
 
+def _effective_window_days(user_id: int, query: str, time_period_days: int) -> int:
+    """Incremental search: if this user+query completed a run before, narrow the search
+    window to the time since that run (+12h buffer for late-indexed posts), floored at
+    1 day and never wider than the requested window. First run → full window."""
+    import math
+    from datetime import datetime, timezone
+
+    try:
+        checkpoint = get_pull_checkpoint(user_id, query)
+    except Exception:
+        checkpoint = None
+    if not checkpoint or not checkpoint.get("last_run_at"):
+        return time_period_days
+    try:
+        last_run = datetime.strptime(checkpoint["last_run_at"], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except Exception:
+        return time_period_days
+    hours_since = max(0.0, (datetime.now(timezone.utc) - last_run).total_seconds() / 3600)
+    return min(time_period_days, max(1, math.ceil((hours_since + 12) / 24)))
+
+
 async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, time_period_days: int = 7):
-    """Background task to run the agent and save results to the SQLite database."""
+    """Background task to run the agent and save results to the database."""
     if job_types is None:
         job_types = ["fulltime", "remote"]
     global agent_status
@@ -138,6 +164,15 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
 
     try:
         total_jobs_count = 0
+
+        effective_days = _effective_window_days(user_id, query, time_period_days)
+        if effective_days < time_period_days:
+            await publish_log(
+                f"\n[Backend] Incremental search: last successful run for this query was "
+                f"recent — narrowing the window from {time_period_days} to "
+                f"{effective_days} day(s) to avoid re-searching old ground.\n"
+            )
+        time_period_days = effective_days
 
         async def log_callback(thought: str):
             await publish_log(thought)
@@ -147,6 +182,7 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
             in incrementally instead of waiting for the whole agent run to complete."""
             nonlocal total_jobs_count
             inserted = 0
+            saved_urls = []
             for job in jobs_batch:
                 job_dict = (
                     job.model_dump()
@@ -156,9 +192,16 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
                 try:
                     if save_job(job_dict, user_id):
                         inserted += 1
+                    saved_urls.append(job_dict.get("url"))
                 except Exception:
                     pass
             total_jobs_count += inserted
+            # Feed saved URLs back into the search tools' run context so a job found
+            # via one source isn't re-surfaced by a later tool call from another.
+            try:
+                add_known_urls(saved_urls)
+            except Exception:
+                pass
             await publish_log(
                 f"\n[Backend] Saved a batch of {len(jobs_batch)} jobs "
                 f"({inserted} new). Database now holds {total_jobs_count} total jobs.\n"
@@ -208,6 +251,12 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
                 f"{inserted_count} new, {updated_count} already saved from a batch. Database now holds "
                 f"{len(get_user_jobs(user_id))} total jobs.\n"
             )
+            # Checkpoint ONLY on success: the next run for this query narrows its
+            # window to "since this run". A failed run never narrows the next window.
+            try:
+                upsert_pull_checkpoint(user_id, query, len(jobs_list))
+            except Exception:
+                pass
     except Exception as e:
         await publish_log(f"\n[Backend Error] Agent failed: {e}\n")
     finally:

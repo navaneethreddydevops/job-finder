@@ -5,14 +5,19 @@ Guidance for Claude Code (and other AI agents) working in this repository.
 ## What this is
 
 A full-stack **Job Finder**. An autonomous agent built on the **Claude Agent SDK** researches
-five sources — **LinkedIn (`linkedin.com/jobs`) and the ATS-hosted company careers portals
-Workday (`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io` / `job-boards.greenhouse.io`),
-Lever (`jobs.lever.co`), and Ashby (`jobs.ashbyhq.com`)** — for **remote, full-time** jobs posted
-in the **last 7 days**, using parallel `job_scout` subagents. It searches the role the user types
+twelve sources — **LinkedIn, Indeed, Glassdoor, and ZipRecruiter** (bulk-scraped via the
+structured `jobspy_search` tool, which also covers Google Jobs), the **ATS-hosted company careers
+portals Workday (`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io` /
+`job-boards.greenhouse.io`), Lever (`jobs.lever.co`), and Ashby (`jobs.ashbyhq.com`)**, the tech
+boards **Dice, Wellfound, and Built In**, and **`Company`** (employer career pages on the open
+web) — for **remote, full-time jobs open to US-based candidates** posted in the **last 7 days**,
+using parallel `job_scout` subagents. It searches the role the user types
 as the Search Target (falling back to a default set of Principal-level platform/infra roles —
 DevOps, Cloud, Kubernetes, SRE — only when the query is empty). Results are extracted as
-structured JSON and stored in SQLite. A **FastAPI** backend exposes the agent + data over REST/SSE,
-and a **Vite + React** dashboard renders the results with live agent-thought streaming.
+structured JSON and stored in the database incrementally as each scout batch finishes; per-query
+checkpoints make repeat runs incremental (see below). A **FastAPI** backend exposes the agent +
+data over REST/SSE, and a **Vite + React** dashboard renders the results with live agent-thought
+streaming.
 
 ```
 job-finder/
@@ -99,23 +104,27 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
 
 - The orchestrator searches ONLY the user's Search Target query as the role; `DEFAULT_ROLES`
   (Principal DevOps / Cloud / Kubernetes / Site Reliability Engineer) are used solely as a
-  fallback when the query is empty. It
-  searches every **role × source** pair itself with the Exa/Tavily tools (in-process SDK MCP
-  tools can't be granted to subagents) — **LinkedIn plus the Workday/Greenhouse/Lever/Ashby
-  careers portals only** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter) — then spawns
+  fallback when the query is empty. Per role it FIRST calls `jobspy_search` once (one structured
+  call covers Indeed/LinkedIn/Glassdoor/ZipRecruiter/Google Jobs and returns `pre_verified=true`
+  candidates — the main token saver), then searches the role × each remaining source
+  (Workday, Greenhouse, Lever, Ashby, Dice, Wellfound, Built In, Company) itself with the
+  Exa/Tavily tools (in-process SDK MCP tools can't be granted to subagents), then spawns
   `job_scout` subagents in parallel (via the built-in **Task** tool) to verify + format batches
-  of 30-40 candidates, and finally merges and de-duplicates the results.
+  of 30-40 candidates, and finally merges and de-duplicates the results. Scouts must NEVER
+  WebFetch `pre_verified=true` candidates — those are format-only.
 - **Tools granted to both agents** (`AGENT_ALLOWED_TOOLS` and `SCOUT_ALLOWED_TOOLS`):
   - **File operations**: `Read`, `Write`, `Edit` — for processing and storing job data
   - **System operations**: `Bash`, `Glob`, `Grep` — for data processing and filtering
-  - **Job search APIs**: `mcp__jobsearch__exa_search`, `mcp__jobsearch__tavily_search` — the
-    primary job-discovery tools (Exa + Tavily), via an in-process SDK MCP server (`backend/search_tools.py`)
+  - **Job search**: `mcp__jobsearch__jobspy_search` (primary bulk, structured JobSpy scrape),
+    `mcp__jobsearch__exa_search`, `mcp__jobsearch__tavily_search` (Exa + Tavily), via an
+    in-process SDK MCP server (`backend/search_tools.py`)
   - **Web operations**: `WebSearch`, `WebFetch` — fallback search + reading individual listings
   - **Agent control**: `Task` (orchestrator only), `TodoWrite` — for orchestration and planning
-  - The only MCP integration is the in-process `jobsearch` server (Exa + Tavily). No external MCP servers.
-- `model="claude-sonnet-5"` for both the orchestrator and the `job_scout` subagent (the resume
-  optimizer in `resume.py` uses the same model). Sonnet is chosen for stronger structured-output
-  parsing and smarter tool use; `permission_mode="bypassPermissions"`.
+  - The only MCP integration is the in-process `jobsearch` server (JobSpy + Exa + Tavily). No external MCP servers.
+- `model="claude-sonnet-5"` for the orchestrator (and the resume optimizer in `resume.py`);
+  the `job_scout` subagent runs on **`claude-haiku-4-5`** — scouts do mechanical verify+format
+  work (and skip WebFetch entirely for pre-verified jobspy batches), so the smaller model cuts
+  cost ~3x with no recall loss. `permission_mode="bypassPermissions"`.
 - **Structured output** is enforced via `output_format=JobList.model_json_schema()`. If
   `msg.structured_output` is absent, the final `msg.result` is parsed with the tolerant
   `_extract_jobs_from_text` helper (handles ```json fences, **bare/unfenced arrays**,
@@ -124,21 +133,32 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
   As a final safety net, every job parsed from a scout result is accumulated (de-duped by URL);
   if the orchestrator's final message yields no parseable list, those collected jobs are returned
   and saved, so a run that visibly found jobs never persists nothing.
-- **Remote, full-time only**: The agent keeps only remote full-time (FTE) roles and excludes
-  non-remote, contract, temporary, internship, and part-time roles.
+- **Remote, full-time, US-eligible only**: The agent keeps only remote full-time (FTE) roles
+  open to US-based candidates, and excludes non-remote, contract, temporary, internship,
+  part-time, and country-restricted (non-US) roles.
 
-### User-driven role + fixed sources — LinkedIn plus ATS careers portals
+### User-driven role + fixed sources — boards, ATS portals, and career pages
 The agent researches the user's Search Target query as the only role; `DEFAULT_ROLES` in
 `agent.py` (Principal DevOps / Cloud / Kubernetes / Site Reliability Engineer) are a fallback
 used only when the query is empty — never added on top of a typed query. Sources are fixed to
-`SEARCH_SOURCES = ["LinkedIn", "Workday", "Greenhouse", "Lever", "Ashby"]` — **LinkedIn
-(`linkedin.com/jobs`) and the ATS-hosted careers portals Workday (`*.myworkdayjobs.com`),
-Greenhouse (`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever (`jobs.lever.co`), and
-Ashby (`jobs.ashbyhq.com`)** — all direct employer postings with reliable dates. Do not
-reintroduce aggregator boards (Glassdoor, Dice, Monster, Indeed, ZipRecruiter): stale reposts,
-scrape-hostile, unreliable dates. The source list is intentionally fixed in
-`agent.py`'s scout prompt and run prompt. The `source` field is one of `'LinkedIn'`, `'Workday'`,
-`'Greenhouse'`, `'Lever'`, or `'Ashby'`.
+the 12 entries of `SEARCH_SOURCES` in `agent.py`: **LinkedIn, Indeed, Glassdoor, ZipRecruiter**
+(covered in bulk by `jobspy_search`, which also scrapes Google Jobs — those results map to
+`Company`), the **ATS-hosted careers portals Workday (`*.myworkdayjobs.com`), Greenhouse
+(`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever (`jobs.lever.co`), Ashby
+(`jobs.ashbyhq.com`)**, **Dice, Wellfound, Built In**, and **`Company`** — employer career pages
+searched on the open web (Exa/Tavily with the known board domains excluded). The aggregator
+boards were deliberately re-added at the user's request (2026-07) because JobSpy's structured
+scraping fixes the old reliability problems; Monster remains out. The `source` field is one of
+`'LinkedIn'`, `'Indeed'`, `'Glassdoor'`, `'ZipRecruiter'`, `'Workday'`, `'Greenhouse'`,
+`'Lever'`, `'Ashby'`, `'Dice'`, `'Wellfound'`, `'Built In'`, or `'Company'`.
+
+### US-only enforcement (no DB column)
+Jobs must be open to US-based candidates. This is enforced at collection time only — nothing is
+persisted (every stored job is US-eligible by construction): `jobspy_search` is structurally
+US-scoped (`country_indeed="USA"`, `location="United States"`, `is_remote=True`); Exa/Tavily
+results carry a regex-derived `us_eligible` bool|null annotation (`_classify_us_eligible` in
+`search_tools.py`); both prompts drop `us_eligible=false` / country-restricted roles and keep
+unknowns (keep-by-default, scouts judge borderline cases).
 
 ### Pull as many fresh roles as possible
 There is **no upper limit** on job count — more is better. Do not reintroduce a fixed
@@ -162,25 +182,37 @@ enforced at every layer, so keep them in sync if you touch one:
    revert this to a drop-by-default filter — that silently hid every job when the backend flag was
    absent (`posted_within_7d=0`, `date_posted=NULL`).
 
-## Search tooling — Exa + Tavily (`backend/search_tools.py`)
+## Search tooling — JobSpy + Exa + Tavily (`backend/search_tools.py`)
 
-Job discovery is done via the **Exa** and **Tavily** search APIs, exposed to the agent as
-**in-process SDK MCP tools** (`create_sdk_mcp_server` → server name `jobsearch`):
+Job discovery is done via the **JobSpy** structured scraper plus the **Exa** and **Tavily**
+search APIs, exposed to the agent as **in-process SDK MCP tools** (`create_sdk_mcp_server` →
+server name `jobsearch`):
 
+- `mcp__jobsearch__jobspy_search(search_term, time_period_days, results_wanted)` — the
+  **primary bulk** discovery tool: one call scrapes Indeed, LinkedIn, Glassdoor, ZipRecruiter,
+  and Google Jobs via the open-source `python-jobspy` library (free, no API key) and returns
+  structured, **pre-verified** records (remote/full-time/date/US enforced in Python;
+  `pre_verified=true`, `us_eligible=true`, salary fields included). Runs `scrape_jobs` via
+  `asyncio.to_thread`; on ImportError/scrape failure it returns a clear message and the agent
+  falls back to Exa/Tavily for those sources. **Deploy-size note**: jobspy pulls pandas/numpy
+  (~100 MB installed) — expected; don't "optimize" it away without replacing the tool.
 - `mcp__jobsearch__exa_search(query, source)` and `mcp__jobsearch__tavily_search(query, source)` —
-  each scopes results to the assigned source's domain(s) (`linkedin.com`, `myworkdayjobs.com`,
-  `boards.greenhouse.io`/`job-boards.greenhouse.io`, `jobs.lever.co`, `jobs.ashbyhq.com`),
-  enforces the last-7-days window, and returns a compact JSON list of candidate postings
-  (`title, url, published_date, snippet`). These are the **primary** discovery tools and the reason
-  recall is high (the built-in `WebSearch` alone returned too few results).
+  cover the non-jobspy sources: each scopes results to the assigned source's domain(s)
+  (`myworkdayjobs.com`, `boards.greenhouse.io`/`job-boards.greenhouse.io`, `jobs.lever.co`,
+  `jobs.ashbyhq.com`, `dice.com`, `wellfound.com`, `builtin.com`; the board domains also exist
+  in the map for jobspy fallback), enforces the search window, and returns a compact JSON list
+  of candidate postings annotated with `remote`/`full_time`/`posted_within_7d`/`us_eligible`.
+  `source='Company'` (career pages) is special: `_domains_for` returns `[]` and the tools search
+  the open web with `ALL_SOURCE_DOMAINS` as the exclude list.
+- **Cross-run dedup (keep it)**: all three tools consult a per-run context
+  (`set_run_context`/`clear_run_context`/`add_known_urls`) holding the user's stored job URLs and
+  drop known results before returning (`skipped_known` in the payload) — this is what makes
+  repeat runs cheap. Safe as module state only because `/api/pull` enforces one run at a time.
 - **Keys**: read from env `EXA_API_KEY` / `TAVILY_API_KEY` (never hardcoded; in `.env` locally,
   FastAPI Cloud Secrets in prod). If a key is missing, the tool returns a clear message and the agent
-  falls back to `WebSearch`.
+  falls back to `WebSearch`. JobSpy needs no key.
 - `WebSearch` — fallback web search when a search API key is unavailable.
-- `WebFetch` — opens and reads individual listings to verify dates, that the role is remote + full-time, and extract fields.
-
-Do not add aggregator boards to `search_tools.py`'s domain map — only the LinkedIn +
-Workday/Greenhouse/Lever/Ashby domains in `ALL_SOURCE_DOMAINS` are allowed.
+- `WebFetch` — opens and reads individual listings to verify dates, that the role is remote + full-time, and extract fields (never for `pre_verified` jobspy results).
 
 ## Persistence (`backend/db.py` — dual backend: SQLite local, Postgres/Neon prod)
 
@@ -216,6 +248,12 @@ Workday/Greenhouse/Lever/Ashby domains in `ALL_SOURCE_DOMAINS` are allowed.
   finishes** (via `run_job_finder_agent`'s `batch_callback`), so the dashboard fills in
   progressively without waiting for the whole run; the agent's final merged list is saved
   at the end as a de-duplicating reconciliation pass. See `app_spec.md` Task 5.
+  **Checkpointed & incremental (keep it)**: `_effective_window_days` reads the
+  `pull_checkpoints` row for `(user_id, normalized query)` and narrows the search window to
+  "hours since the last successful run + 12h buffer" (floor 1 day, cap = requested window);
+  the checkpoint is written via `upsert_pull_checkpoint` **only after a successful run**.
+  `batch_callback` also feeds saved URLs into the search tools' run context
+  (`add_known_urls`) so later tool calls in the same run skip them.
 - `GET /api/jobs` — all stored jobs.
 - `GET /api/stream` — SSE stream of agent thoughts/tool calls/backend logs. On a DB
   write the backend emits a `Database now holds …` line that the UI uses to refresh.

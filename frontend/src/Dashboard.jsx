@@ -744,7 +744,7 @@ function Dashboard() {
             <span className="stat-value"><AnimatedNumber value={stats.total} /></span>
           </div>
         </div>
-        <div className="stat-card" id="stat-card-fulltime" title="Full-time roles from Workday, LinkedIn, and Glassdoor">
+        <div className="stat-card" id="stat-card-fulltime" title="Remote US full-time roles from 12 sources including LinkedIn, Indeed, Glassdoor, and company career pages">
           <div className="stat-icon-wrapper success"><CheckCircle2 size={22} /></div>
           <div className="stat-info">
             <span className="stat-label">Full-Time Roles</span>
@@ -1364,7 +1364,7 @@ function Dashboard() {
               </h3>
               <p className="empty-state-desc">
                 {jobs.length === 0
-                  ? 'Enter a search target and trigger the agent to find full-time roles on Workday, LinkedIn, and Glassdoor.'
+                  ? 'Enter a search target and trigger the agent to find remote US full-time roles across LinkedIn, Indeed, Glassdoor, ZipRecruiter, Dice, Wellfound, Built In, the ATS career portals, and company career pages.'
                   : 'No jobs match your active filters.'}
               </p>
               {jobs.length === 0 ? (

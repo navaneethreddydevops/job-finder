@@ -378,8 +378,79 @@ def init_db():
         """
     )
 
+    # Per-user, per-query checkpoints for the manual /api/pull flow: the next run for
+    # the same query narrows its search window to "since last successful run" and the
+    # search tools skip URLs already stored — incremental search, no re-verifying
+    # known jobs. (Distinct from saved_searches/search_runs, which belong to the
+    # saved-searches feature.)
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS pull_checkpoints (
+            id {AUTO_PK},
+            user_id INTEGER NOT NULL,
+            query_normalized TEXT NOT NULL,
+            last_run_at TEXT,
+            jobs_found INTEGER DEFAULT 0,
+            UNIQUE(user_id, query_normalized),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
+
+
+def normalize_pull_query(query: str) -> str:
+    """Canonical form of a Search Target query for checkpoint lookups."""
+    return " ".join((query or "").lower().split())
+
+
+def get_pull_checkpoint(user_id: int, query: str):
+    """Returns {'last_run_at': str, 'jobs_found': int} for the user's last successful
+    pull with this query, or None if this query has never completed a run."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT last_run_at, jobs_found FROM pull_checkpoints "
+        "WHERE user_id = ? AND query_normalized = ?",
+        (user_id, normalize_pull_query(query)),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"last_run_at": row["last_run_at"], "jobs_found": row["jobs_found"]}
+
+
+def upsert_pull_checkpoint(user_id: int, query: str, jobs_found: int):
+    """Records a successful pull run so the next run for the same query can search
+    incrementally. Only call after a run completes without error."""
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO pull_checkpoints (user_id, query_normalized, last_run_at, jobs_found)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id, query_normalized)
+        DO UPDATE SET last_run_at = excluded.last_run_at, jobs_found = excluded.jobs_found
+        """,
+        (user_id, normalize_pull_query(query), now, jobs_found),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_job_urls(user_id: int) -> set[str]:
+    """Lightweight fetch of every stored job URL for a user (for cross-run dedup in the
+    search tools — known URLs are filtered out server-side before the agent sees them)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT url FROM jobs WHERE user_id = ?", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return {row["url"] for row in rows if row["url"]}
 
 
 def save_job(job_dict, user_id: int):

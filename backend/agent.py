@@ -17,13 +17,16 @@ from claude_agent_sdk.types import (
     ResultMessage,
 )
 
-# Exa + Tavily search tools (in-process SDK MCP server). The scouts call these to fetch
-# job listings with far better recall than the built-in WebSearch.
+# JobSpy + Exa + Tavily search tools (in-process SDK MCP server). The orchestrator calls
+# these to fetch job listings with far better recall than the built-in WebSearch.
 from search_tools import (
     job_search_server,
     JOB_SEARCH_SERVER_NAME,
     EXA_TOOL,
     TAVILY_TOOL,
+    JOBSPY_TOOL,
+    set_run_context,
+    clear_run_context,
 )
 
 # Load environment variables
@@ -42,7 +45,9 @@ os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 # the Exa + Tavily search tools (in-process SDK MCP server `jobsearch`), with WebFetch
 # as fallback for verifying individual listings.
 AGENT_ALLOWED_TOOLS = [
-    # Job search APIs (Exa + Tavily, via the in-process `jobsearch` MCP server)
+    # Job search (JobSpy structured scraping + Exa + Tavily, via the in-process
+    # `jobsearch` MCP server)
+    JOBSPY_TOOL,
     EXA_TOOL,
     TAVILY_TOOL,
     # Web operations (fallback verification only)
@@ -72,11 +77,27 @@ DEFAULT_ROLES = [
     "Principal Site Reliability Engineer",
 ]
 
-# The only sources the agent searches. LinkedIn + the ATS-hosted company careers portals
-# (Workday, Greenhouse, Lever, Ashby) — all direct employer postings with reliable dates.
-# Aggregator boards (Indeed, Glassdoor, Dice, Monster, ZipRecruiter) stay banned: stale
-# reposts, scrape-hostile, unreliable dates.
-SEARCH_SOURCES = ["LinkedIn", "Workday", "Greenhouse", "Lever", "Ashby"]
+# The sources the agent searches. The first four are covered in bulk by the structured
+# jobspy_search tool (one call per role, pre-verified results); the rest go through
+# exa_search/tavily_search. "Company" means employer career pages on the open web.
+SEARCH_SOURCES = [
+    "LinkedIn",
+    "Indeed",
+    "Glassdoor",
+    "ZipRecruiter",
+    "Workday",
+    "Greenhouse",
+    "Lever",
+    "Ashby",
+    "Dice",
+    "Wellfound",
+    "Built In",
+    "Company",
+]
+# Sources NOT covered by jobspy — the orchestrator searches these with exa/tavily.
+NON_JOBSPY_SOURCES = [
+    "Workday", "Greenhouse", "Lever", "Ashby", "Dice", "Wellfound", "Built In", "Company",
+]
 
 
 # Pydantic Schemas for Structured Output
@@ -84,7 +105,7 @@ class JobItem(BaseModel):
     title: str = Field(description="The job title")
     company: str = Field(description="The company name")
     location: str = Field(
-        description="The location — should be 'Remote' (only remote roles are collected)"
+        description="The location — should be 'Remote' (only US-eligible remote roles are collected)"
     )
     url: str = Field(description="The direct job posting link or source URL")
     date_posted: str = Field(
@@ -103,10 +124,23 @@ class JobItem(BaseModel):
         None, description="Recruiter or contact phone number if available"
     )
     source: str = Field(
-        description="Source website/portal: one of 'LinkedIn', 'Workday', 'Greenhouse', 'Lever', or 'Ashby'."
+        description=(
+            "Source website/portal: one of 'LinkedIn', 'Indeed', 'Glassdoor', "
+            "'ZipRecruiter', 'Workday', 'Greenhouse', 'Lever', 'Ashby', 'Dice', "
+            "'Wellfound', 'Built In', or 'Company' (employer career page)."
+        )
     )
     description: str = Field(
-        description="Short summary of the job description, responsibilities, and other details"
+        description="1-2 sentence summary of the job description and responsibilities"
+    )
+    salary_min: float | None = Field(
+        None, description="Minimum annual salary if the posting states one"
+    )
+    salary_max: float | None = Field(
+        None, description="Maximum annual salary if the posting states one"
+    )
+    salary_currency: str | None = Field(
+        None, description="Salary currency code, e.g. 'USD', if the posting states a salary"
     )
 
 
@@ -231,9 +265,11 @@ async def _run_job_finder_agent(
 ):
     """Initializes and executes the job finder agent using the claude-agent-sdk.
 
-    The agent researches the user's Search Target `query` across the SEARCH_SOURCES
-    (LinkedIn plus the Workday/Greenhouse/Lever/Ashby careers portals). Only when the
-    query is empty does it fall back to the DEFAULT_ROLES.
+    The agent researches the user's Search Target `query` across the SEARCH_SOURCES —
+    the jobspy-covered boards (LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google Jobs)
+    plus the Workday/Greenhouse/Lever/Ashby careers portals, Dice, Wellfound, Built In,
+    and employer career pages ("Company"). Only remote, full-time roles open to US-based
+    candidates are kept. Only when the query is empty does it fall back to DEFAULT_ROLES.
 
     Args:
         query: The search role/term from Agent Controls, e.g. "Staff Platform Engineer".
@@ -290,18 +326,28 @@ async def _run_job_finder_agent(
         prompt=(
             f"You verify and format candidate job postings ({job_type_str}) found between "
             f"{since_date} and {run_date}.\n"
+            "Candidates with pre_verified=true come from structured scraping — their remote/"
+            "full_time/date/US fields are already verified server-side. NEVER WebFetch or "
+            "WebSearch these; just map their fields into the output schema.\n"
             "KEEP a candidate when: posted_within_7d is true or null (null means the search "
-            "was already time-filtered at the source), remote is not false, and full_time is "
-            "not false. DROP contract, temporary, internship, part-time, and onsite/hybrid "
-            "roles. For borderline candidates, KEEP them — dropping a real job is worse than "
-            "including a borderline one.\n"
+            "was already time-filtered at the source), remote is not false, full_time is "
+            "not false, and us_eligible is not false. DROP contract, temporary, internship, "
+            "part-time, and onsite/hybrid roles, and any role not open to US-based "
+            "candidates (us_eligible=false, or the text restricts it to another country/"
+            "region, e.g. 'Remote — UK only', 'EU timezones'). For borderline candidates, "
+            "KEEP them — dropping a real job is worse than including a borderline one.\n"
             "For each kept job output: title, company, location='Remote', url, date_posted, "
             "posted_within_7d (true unless the date is clearly older than the window), "
             "key_requirements (list of skills), contact_email, contact_phone, source (one of "
-            "'LinkedIn', 'Workday', 'Greenhouse', 'Lever', 'Ashby'), description (2-3 sentences).\n"
+            "'LinkedIn', 'Indeed', 'Glassdoor', 'ZipRecruiter', 'Workday', 'Greenhouse', "
+            "'Lever', 'Ashby', 'Dice', 'Wellfound', 'Built In', 'Company'), description "
+            "(1-2 short sentences), and salary_min/salary_max/salary_currency when the "
+            "candidate provides them (else null).\n"
             "Return ONLY a JSON array [{...}, {...}] — every kept job, no prose, no markdown fence."
         ),
-        model="claude-sonnet-5",
+        # Haiku: scouts do mechanical verify+format work (and skip WebFetch entirely for
+        # pre-verified jobspy batches) — a smaller model cuts cost ~3x with no recall loss.
+        model="claude-haiku-4-5",
         tools=SCOUT_ALLOWED_TOOLS,
     )
 
@@ -317,8 +363,9 @@ async def _run_job_finder_agent(
         agents={"job_scout": job_scout},
         allowed_tools=AGENT_ALLOWED_TOOLS,
         mcp_servers={JOB_SEARCH_SERVER_NAME: job_search_server},
-        # 4-5 roles x 5 sources x 2 search tools ≈ 40-50 search calls plus parallel scout
-        # batches — 80 turns starved the wider fan-out and cut runs off mid-search.
+        # Per role: 1 jobspy call + 8 non-jobspy sources x 2 search tools ≈ 17 search
+        # calls, plus parallel scout batches. 150 is generous headroom for the 4-role
+        # default fallback; 80 turns previously starved the fan-out mid-search.
         max_turns=150,
         output_format=JobList.model_json_schema(),
         permission_mode="bypassPermissions",
@@ -334,36 +381,79 @@ async def _run_job_finder_agent(
     # Keyword string for search queries: job types + "remote", de-duplicated in order
     # (job_type_str usually already contains "remote").
     query_keywords = " ".join(dict.fromkeys(f"{job_type_str} remote".split()))
+    non_jobspy_text = ", ".join(NON_JOBSPY_SOURCES)
     prompt = (
-        f"Find as many {job_type_str} jobs as possible posted between {since_date} and "
-        f"{run_date} (last {time_period_days} days). There is NO upper limit on job count — "
-        f"more is strictly better. Do not stop early or settle for a sample; exhaust every "
-        f"role x source combination below before finishing.\n\n"
+        f"Find as many {job_type_str} jobs open to US-based candidates as possible, posted "
+        f"between {since_date} and {run_date} (last {time_period_days} days). There is NO "
+        f"upper limit on job count — more is strictly better. Do not stop early or settle "
+        f"for a sample; exhaust every step below for every role before finishing.\n\n"
         f"Roles (search ALL of them): {roles_list}\n"
-        f"Sources (search ALL of them): {sources_text}. Nothing else — never Indeed, "
-        f"Glassdoor, Dice, Monster, or ZipRecruiter.\n\n"
-        f"For EVERY role x source pair, run BOTH search tools (they return different results; "
-        f"skipping one loses jobs):\n"
-        f"1. exa_search(query='<role> {query_keywords}', source='<source>', "
+        f"Sources: {sources_text}.\n"
+        f"The search tools automatically exclude jobs already in the user's database "
+        f"(reported as skipped_known) and are scoped to postings since {since_date} — do "
+        f"not re-search or re-verify older postings; focus on new results.\n\n"
+        f"For EVERY role:\n"
+        f"1. FIRST call jobspy_search(search_term='<role>', "
+        f"time_period_days={time_period_days}) ONCE — it covers LinkedIn, Indeed, "
+        f"Glassdoor, ZipRecruiter, and Google Jobs in a single call and returns "
+        f"pre-verified candidates (pre_verified=true). Never WebFetch those.\n"
+        f"2. THEN, for the role x each remaining source ({non_jobspy_text}), run BOTH "
+        f"search tools (they return different results; skipping one loses jobs):\n"
+        f"   exa_search(query='<role> {query_keywords}', source='<source>', "
         f"time_period_days={time_period_days})\n"
-        f"2. tavily_search(query='<role> {query_keywords}', source='<source>', "
+        f"   tavily_search(query='<role> {query_keywords}', source='<source>', "
         f"time_period_days={time_period_days})\n"
-        f"3. If a pair returned fewer than 5 candidates, retry ONCE with a broader query "
-        f"variation (drop the seniority qualifier — e.g. 'Principal'/'Senior'/'Staff' — or "
-        f"use a close synonym of the role title), then move on.\n"
-        f"4. Keep candidates where posted_within_7d is true or null, remote is not false, "
-        f"and full_time is not false. When a field is null, keep the candidate — the scout "
-        f"verifies borderline cases.\n"
-        f"5. As soon as you have 30-40 kept candidates, spawn a job_scout to verify + format "
+        f"   For source='Company' the tools search employer career pages on the open web; "
+        f"use a query like '<role> {query_keywords} careers apply'.\n"
+        f"3. Only if jobspy_search fails or returns an error, fall back to exa_search/"
+        f"tavily_search with source='LinkedIn'/'Indeed'/'Glassdoor'/'ZipRecruiter'.\n"
+        f"4. If a role x source pair returned fewer than 5 candidates, retry ONCE with a "
+        f"broader query variation (drop the seniority qualifier — e.g. 'Principal'/"
+        f"'Senior'/'Staff' — or use a close synonym of the role title), then move on.\n"
+        f"5. Keep candidates where posted_within_7d is true or null, remote is not false, "
+        f"full_time is not false, and us_eligible is not false (jobs must be open to "
+        f"US-based candidates — drop 'Remote, UK only'-style roles). When a field is null, "
+        f"keep the candidate — the scout verifies borderline cases.\n"
+        f"6. As soon as you have 30-40 kept candidates, spawn a job_scout to verify + format "
         f"that batch, and run multiple scouts IN PARALLEL while you keep searching. Pass each "
-        f"scout the full candidate data including the remote/full_time/posted_within_7d "
-        f"annotations and the source name.\n"
-        f"6. Merge all scout outputs, de-duplicate by URL only (same role at different "
+        f"scout the full candidate data including the remote/full_time/posted_within_7d/"
+        f"us_eligible/pre_verified annotations, salary fields, and the source name.\n"
+        f"7. Merge all scout outputs, de-duplicate by URL only (same role at different "
         f"companies is NOT a duplicate), and return the COMPLETE merged list — never "
         f"truncate or summarize it.\n\n"
         f'Return ONLY a JSON object of the form {{"jobs": [ ... ]}} with every job found.'
     )
 
+    # Cross-run dedup: load every job URL already stored for this user and install it as
+    # the search tools' run context — the tools drop those results server-side, so the
+    # agent never spends tokens re-verifying jobs from earlier runs. The backend's batch
+    # save adds newly stored URLs during the run (see main.py batch_callback).
+    known_urls: set = set()
+    if user_id is not None:
+        try:
+            from db import get_user_job_urls
+
+            known_urls = get_user_job_urls(user_id)
+        except Exception:
+            known_urls = set()
+    set_run_context(known_urls)
+    if log_callback and known_urls:
+        await log_callback(
+            f"[Agent] Incremental search: {len(known_urls)} previously stored jobs will "
+            f"be skipped automatically by the search tools.\n"
+        )
+
+    try:
+        return await _run_agent_session(
+            options, prompt, effective_session_id, log_callback, batch_callback
+        )
+    finally:
+        clear_run_context()
+
+
+async def _run_agent_session(options, prompt, effective_session_id, log_callback, batch_callback):
+    """The actual SDK session loop, split out so the search-tool run context is always
+    cleared in the caller's finally regardless of how the run ends."""
     async with ClaudeSDKClient(options) as client:
         # We start the query, passing the session_id for conversation tracking
         await client.query(prompt, session_id=effective_session_id)
