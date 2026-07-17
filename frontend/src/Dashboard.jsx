@@ -1441,12 +1441,12 @@ function Dashboard() {
                       {selectedJob.contact_phone && (
                         <div className="contact-item"><Phone size={14} />Phone: {selectedJob.contact_phone}</div>
                       )}
-                      {selectedJob.url && (
+                      {selectedJob.url?.startsWith('http') && (
                         <div className="contact-item"><LinkIcon size={14} /><a href={selectedJob.url} target="_blank" rel="noopener noreferrer">View Original Posting</a></div>
                       )}
                     </div>
                     <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                      {selectedJob.url && (
+                      {selectedJob.url?.startsWith('http') && (
                         <a
                           href={selectedJob.url}
                           target="_blank"

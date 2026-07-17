@@ -44,6 +44,7 @@ import re
 import json
 import asyncio
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -152,6 +153,29 @@ def add_known_urls(urls):
 
 def _normalize_url(url: str) -> str:
     return (url or "").strip().rstrip("/").lower()
+
+
+# Obvious search/listing-index pages, not individual postings. Conservative on purpose:
+# real posting URLs (Workday /job/, Greenhouse /jobs/<id>, Lever/Ashby /<uuid>) must pass.
+_BAD_URL_PATH_RE = re.compile(
+    r"/(search|jobs/search|job-search|browse|category|categories|explore)([/?#]|$)"
+    r"|[?&]q=|[?&]keywords=",
+    re.IGNORECASE,
+)
+
+
+def _is_valid_job_url(url) -> bool:
+    """Cheap static check that a URL can plausibly open a specific job posting:
+    http(s) with a host, not a bare domain root, not an obvious search/index page."""
+    u = str(url or "").strip()
+    if not u.lower().startswith(("http://", "https://")):
+        return False
+    parsed = urlparse(u)
+    if not parsed.netloc:
+        return False
+    if parsed.path in ("", "/") and not parsed.query:
+        return False
+    return not _BAD_URL_PATH_RE.search(u)
 
 
 def _filter_known(results: list[dict]) -> tuple[list[dict], int]:
@@ -452,6 +476,8 @@ async def exa_search(args: dict) -> dict:
 
             results = []
             for r in data.get("results", []) or []:
+                if not _is_valid_job_url(r.get("url")):
+                    continue
                 results.append(
                     {
                         "title": r.get("title"),
@@ -551,6 +577,8 @@ async def tavily_search(args: dict) -> dict:
 
     results = []
     for r in data.get("results", []) or []:
+        if not _is_valid_job_url(r.get("url")):
+            continue
         results.append(
             {
                 "title": r.get("title"),
@@ -642,8 +670,11 @@ async def _jobspy_search_impl(args: dict) -> dict:
     results = []
     for row in (df.to_dict("records") if df is not None and not df.empty else []):
         row = {k: _none_if_nan(v) for k, v in row.items()}
-        url = row.get("job_url") or row.get("job_url_direct")
-        if not url:
+        # Prefer the direct employer/ATS apply link over the board's redirect page —
+        # board redirect URLs expire or bounce to search results far more often.
+        direct = row.get("job_url_direct")
+        url = direct if _is_valid_job_url(direct) else row.get("job_url")
+        if not _is_valid_job_url(url):
             continue
         # Hard filters, applied here so the agent never spends tokens on rejects:
         # remote-only and full-time-only (unknown job_type is kept — scouts judge it).

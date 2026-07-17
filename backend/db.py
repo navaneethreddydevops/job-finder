@@ -455,25 +455,29 @@ def get_user_job_urls(user_id: int) -> set[str]:
 
 def save_job(job_dict, user_id: int):
     """
-    Saves or updates a job for a specific user and returns True if a new row was inserted,
-    False if an existing row was updated.
+    Saves or updates a job for a specific user. Returns True if a new row was inserted,
+    False if an existing row was updated, and None if the job was DROPPED by the
+    quality gate (no valid http(s) URL, or empty title/company) — a job without a real
+    posting link or identity is useless in the dashboard, so it is never stored.
 
-    De-duplication is keyed on (user_id, URL) when present. Many scraped jobs come
-    back with an empty/missing URL, so we synthesize a stable key from
-    title|company|location for those — otherwise every URL-less job would collide on
-    the UNIQUE(user_id, url) constraint and collapse into a single row.
+    De-duplication is keyed on (user_id, URL); a valid URL is mandatory.
     """
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    title = job_dict.get("title", "")
-    company = job_dict.get("company", "")
+    title = (job_dict.get("title") or "").strip()
+    company = (job_dict.get("company") or "").strip()
     location = job_dict.get("location", "")
 
     url = (job_dict.get("url") or "").strip()
-    if not url:
-        url = f"manual:{title}|{company}|{location}"
+    if not url.lower().startswith(("http://", "https://")) or not title or not company:
+        print(
+            f"[db] save_job: dropping job with missing critical data "
+            f"(title={title!r}, company={company!r}, url={url!r})",
+            flush=True,
+        )
+        return None
     job_dict["url"] = url
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
     # Check if job with this URL already exists for this user
     cursor.execute("SELECT id, applied FROM jobs WHERE url = ? AND user_id = ?", (url, user_id))
@@ -558,7 +562,20 @@ def save_job(job_dict, user_id: int):
 def get_user_jobs(user_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM jobs WHERE user_id = ? ORDER BY id DESC", (user_id,))
+    # Career portals are the highest-priority sources: portal jobs (direct employer
+    # apply links) sort above aggregator-board jobs, newest-first within each tier.
+    # The WHEN list must mirror PORTAL_SOURCES in agent.py. Plain-SQL CASE — portable
+    # across SQLite and Postgres.
+    cursor.execute(
+        """
+        SELECT * FROM jobs WHERE user_id = ?
+        ORDER BY CASE source
+            WHEN 'Workday' THEN 0 WHEN 'Greenhouse' THEN 0 WHEN 'Lever' THEN 0
+            WHEN 'Ashby' THEN 0 WHEN 'Company' THEN 0
+            ELSE 1 END, id DESC
+        """,
+        (user_id,),
+    )
     rows = cursor.fetchall()
     jobs = []
     for row in rows:

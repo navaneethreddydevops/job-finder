@@ -40,8 +40,8 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
 * **Model**: `claude-sonnet-5` for the orchestrator; `claude-haiku-4-5` for the `job_scout`
   subagents (mechanical verify+format work — ~3x cheaper per token).
-* **max_turns**: `150` (per role: 1 jobspy call + 8 non-jobspy sources × 2 search tools, plus
-  parallel scout batches).
+* **max_turns**: `150` (per role: 8 non-jobspy sources × 2 search tools — portals first —
+  plus 1 jobspy call and parallel scout batches).
 * **permission_mode**: `bypassPermissions`.
 * **allowed_tools**: `AGENT_ALLOWED_TOOLS` grants the built-in toolset (`Read`, `Write`,
   `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite`) **plus** the
@@ -57,11 +57,13 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
 * The **orchestrator** searches ONLY the user's Search Target query as the role; `DEFAULT_ROLES`
   (Principal DevOps / Cloud / Kubernetes / Site Reliability Engineer) are a fallback used only
-  when the query is empty. Per role it FIRST calls `jobspy_search` once (structured, pre-verified
-  bulk scrape of Indeed/LinkedIn/Glassdoor/ZipRecruiter/Google Jobs), then runs `exa_search` +
-  `tavily_search` itself for the role × each remaining source (in-process SDK MCP tools can't
-  be granted to subagents) — Workday, Greenhouse, Lever, Ashby, Dice, Wellfound, Built In, and
-  `Company` (open-web employer career pages) — then merges and de-duplicates the combined results.
+  when the query is empty. Per role it FIRST searches the **career portals** (`PORTAL_SOURCES`:
+  Workday, Greenhouse, Lever, Ashby, and `Company` open-web employer career pages) with
+  `exa_search` + `tavily_search` itself (in-process SDK MCP tools can't be granted to
+  subagents) — these yield direct employer apply links and get the deepest effort; THEN calls
+  `jobspy_search` once (structured, pre-verified bulk scrape of Indeed/LinkedIn/Glassdoor/
+  ZipRecruiter/Google Jobs); THEN searches the secondary boards (Dice, Wellfound, Built In)
+  with both search tools; and finally merges and de-duplicates the combined results.
 * Each **`job_scout`** is handed a batch of 30-40 pre-annotated candidate postings and returns a
   JSON array of verified remote full-time US-eligible jobs; scouts run in parallel while the
   orchestrator keeps searching, and may use `WebFetch`/`WebSearch` to verify borderline
@@ -69,9 +71,15 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
 ### Goals & constraints
 
-* **Sources**: the 12 entries of `SEARCH_SOURCES` in `agent.py` — LinkedIn, Indeed, Glassdoor,
-  ZipRecruiter (jobspy-covered), Workday, Greenhouse, Lever, Ashby, Dice, Wellfound, Built In,
-  and `Company` (employer career pages).
+* **Sources**: the 12 entries of `SEARCH_SOURCES` in `agent.py`, in priority order — the
+  career portals Workday, Greenhouse, Lever, Ashby, and `Company` (employer career pages)
+  come FIRST (highest priority, searched most deeply, sorted to the top of the dashboard),
+  then LinkedIn, Indeed, Glassdoor, ZipRecruiter (jobspy-covered), then Dice, Wellfound,
+  Built In.
+* **Data quality**: every job must have a valid http(s) URL pointing at the specific posting
+  plus a non-empty title and company — `db.save_job` drops anything else (returns `None`),
+  and `search_tools._is_valid_job_url` filters obvious search/category/index-page URLs out
+  of tool results before the agent sees them.
 * **Roles**: search the user's Search Target query only; `DEFAULT_ROLES` are the fallback for an empty query.
 * **Remote US-only**: every kept job must be remote AND open to US-based candidates
   (`us_eligible` is never false; jobspy is US-scoped structurally).
