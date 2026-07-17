@@ -6,13 +6,16 @@ the **Claude Agent SDK** (`claude-agent-sdk`). The implementation lives in
 
 ## Overview
 
-The Job Finder is a specialized autonomous agent that researches **LinkedIn and the
-Workday/Greenhouse/Lever/Ashby careers portals** for **remote, full-time** positions in the role
-the user types as the Search Target (falling back to a default set of Principal-level platform/infra
-roles — DevOps, Cloud, Kubernetes, SRE — only when the query is empty), **posted within the last 7 days**. It runs asynchronously as a FastAPI background task,
-delegates breadth to parallel subagents (one per role × source), evaluates findings against
-the remote + full-time + 7-day-freshness criteria, and returns structured JSON that is
-persisted to SQLite.
+The Job Finder is a specialized autonomous agent that researches **LinkedIn, Indeed, Glassdoor,
+ZipRecruiter (via the structured JobSpy scraper), the Workday/Greenhouse/Lever/Ashby careers
+portals, Dice, Wellfound, Built In, and employer career pages** for **remote, full-time positions
+open to US-based candidates** in the role the user types as the Search Target (falling back to a
+default set of Principal-level platform/infra roles — DevOps, Cloud, Kubernetes, SRE — only when
+the query is empty), **posted within the last 7 days** (narrowed to "since the last successful
+run" on repeat searches via the `pull_checkpoints` table). It runs asynchronously as a FastAPI
+background task, delegates verification/formatting to parallel `job_scout` subagents, evaluates
+findings against the remote + full-time + US-eligible + freshness criteria, and returns structured
+JSON that is persisted to the database in incremental batches.
 
 ---
 
@@ -35,15 +38,18 @@ API key. See `render.yaml`, `backend/Dockerfile.render`, and the README "Cloud D
 
 The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
-* **Model**: `model=None` — inherits whatever model the `claude` CLI is logged in with.
-* **max_turns**: `150` (4-5 roles × 5 sources × 2 search tools plus parallel scout batches).
+* **Model**: `claude-sonnet-5` for the orchestrator; `claude-haiku-4-5` for the `job_scout`
+  subagents (mechanical verify+format work — ~3x cheaper per token).
+* **max_turns**: `150` (per role: 1 jobspy call + 8 non-jobspy sources × 2 search tools, plus
+  parallel scout batches).
 * **permission_mode**: `bypassPermissions`.
 * **allowed_tools**: `AGENT_ALLOWED_TOOLS` grants the built-in toolset (`Read`, `Write`,
   `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `Task`, `TodoWrite`) **plus** the
-  Exa/Tavily search tools (`mcp__jobsearch__exa_search`, `mcp__jobsearch__tavily_search`).
+  search tools (`mcp__jobsearch__jobspy_search`, `mcp__jobsearch__exa_search`,
+  `mcp__jobsearch__tavily_search`).
 * **mcp_servers**: `{"jobsearch": job_search_server}` — an in-process SDK MCP server
-  (`backend/search_tools.py`) wrapping the Exa and Tavily search APIs. This is the only MCP
-  integration; there are no external MCP servers.
+  (`backend/search_tools.py`) wrapping the JobSpy scraper and the Exa/Tavily search APIs. This
+  is the only MCP integration; there are no external MCP servers.
 * **agents**: registers a `job_scout` subagent, which enables the built-in **Task** tool.
 * **output_format**: `JobList.model_json_schema()` for guaranteed structured output.
 
@@ -51,22 +57,24 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
 * The **orchestrator** searches ONLY the user's Search Target query as the role; `DEFAULT_ROLES`
   (Principal DevOps / Cloud / Kubernetes / Site Reliability Engineer) are a fallback used only
-  when the query is empty. It runs the `exa_search` +
-  `tavily_search` tools itself for **every role × source** pair (in-process SDK MCP tools can't
-  be granted to subagents) — **LinkedIn (`linkedin.com/jobs`) and the ATS careers portals
-  Workday (`*.myworkdayjobs.com`), Greenhouse, Lever, and Ashby only** (no
-  Glassdoor/Dice/Monster/Indeed/ZipRecruiter) — then merges and de-duplicates the combined results.
+  when the query is empty. Per role it FIRST calls `jobspy_search` once (structured, pre-verified
+  bulk scrape of Indeed/LinkedIn/Glassdoor/ZipRecruiter/Google Jobs), then runs `exa_search` +
+  `tavily_search` itself for the role × each remaining source (in-process SDK MCP tools can't
+  be granted to subagents) — Workday, Greenhouse, Lever, Ashby, Dice, Wellfound, Built In, and
+  `Company` (open-web employer career pages) — then merges and de-duplicates the combined results.
 * Each **`job_scout`** is handed a batch of 30-40 pre-annotated candidate postings and returns a
-  JSON array of verified remote full-time jobs; scouts run in parallel while the orchestrator
-  keeps searching, and may use `WebFetch`/`WebSearch` to verify borderline candidates.
+  JSON array of verified remote full-time US-eligible jobs; scouts run in parallel while the
+  orchestrator keeps searching, and may use `WebFetch`/`WebSearch` to verify borderline
+  candidates — but NEVER for `pre_verified=true` (jobspy) candidates, which are format-only.
 
 ### Goals & constraints
 
-* **Sources**: ONLY LinkedIn and the Workday/Greenhouse/Lever/Ashby careers portals — fixed
-  in `agent.py` (`SEARCH_SOURCES`, scout prompt, run prompt). Do not add aggregator boards
-  (Indeed, Glassdoor, Dice, Monster, ZipRecruiter).
+* **Sources**: the 12 entries of `SEARCH_SOURCES` in `agent.py` — LinkedIn, Indeed, Glassdoor,
+  ZipRecruiter (jobspy-covered), Workday, Greenhouse, Lever, Ashby, Dice, Wellfound, Built In,
+  and `Company` (employer career pages).
 * **Roles**: search the user's Search Target query only; `DEFAULT_ROLES` are the fallback for an empty query.
-* **Remote-only**: every kept job must be remote.
+* **Remote US-only**: every kept job must be remote AND open to US-based candidates
+  (`us_eligible` is never false; jobspy is US-scoped structurally).
 * **Volume**: pull **as many** matching jobs as possible — there is no upper limit (the
   previous "aim for 20–30" cap was removed); fan out one subagent per role × source.
 * **Freshness**: include **only** jobs posted within the **last 7 days**. Scouts use each
@@ -77,19 +85,32 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
 ---
 
-## Search tooling — Exa + Tavily (`backend/search_tools.py`)
+## Search tooling — JobSpy + Exa + Tavily (`backend/search_tools.py`)
 
-Job discovery uses the **Exa** and **Tavily** search APIs, wrapped as in-process SDK MCP tools
-(`create_sdk_mcp_server`, server name `jobsearch`). Keys come from env `EXA_API_KEY` /
-`TAVILY_API_KEY` (never hardcoded). The domain map (`ALL_SOURCE_DOMAINS`) allows only
-`linkedin.com`, `myworkdayjobs.com`, `boards.greenhouse.io`/`job-boards.greenhouse.io`,
-`jobs.lever.co`, and `jobs.ashbyhq.com`.
+Job discovery uses the **JobSpy** structured scraper (open-source `python-jobspy`, free, no key)
+plus the **Exa** and **Tavily** search APIs, wrapped as in-process SDK MCP tools
+(`create_sdk_mcp_server`, server name `jobsearch`). Exa/Tavily keys come from env `EXA_API_KEY` /
+`TAVILY_API_KEY` (never hardcoded). The domain map (`ALL_SOURCE_DOMAINS`) covers
+`linkedin.com`, `indeed.com`, `glassdoor.com`, `ziprecruiter.com`, `myworkdayjobs.com`,
+`boards.greenhouse.io`/`job-boards.greenhouse.io`, `jobs.lever.co`, `jobs.ashbyhq.com`,
+`dice.com`, `wellfound.com`, and `builtin.com`; `source='Company'` searches the open web with
+those domains excluded. All three tools drop URLs already in the user's database
+(cross-run dedup via the run context — `skipped_known` in the payload).
+
+### 0. `mcp__jobsearch__jobspy_search(search_term, time_period_days, results_wanted)`
+* **Purpose**: Primary bulk discovery. One call scrapes Indeed, LinkedIn, Glassdoor, ZipRecruiter,
+  and Google Jobs (US-scoped: `country_indeed="USA"`, `location="United States"`, `is_remote=True`,
+  `hours_old` from the window) and returns structured, **pre-verified** records (title, company,
+  url, location, date, salary, source, `pre_verified=true`, `us_eligible=true`). Scouts format
+  these without WebFetch. On import/scrape failure it returns a clear message and the agent falls
+  back to Exa/Tavily for those sources.
 
 ### 1. `mcp__jobsearch__exa_search(query, source)` / `mcp__jobsearch__tavily_search(query, source)`
-* **Purpose**: Primary job discovery. Each scopes results to the assigned source's domain and the
-  last 7 days, returning a compact JSON list of candidate postings (`title, url, published_date,
-  snippet`). Far higher recall than the built-in `WebSearch`. If a key is missing the tool returns a
-  clear message and the agent falls back to `WebSearch`.
+* **Purpose**: Job discovery for the non-jobspy sources (ATS portals, Dice, Wellfound, Built In,
+  Company) and jobspy fallback. Each scopes results to the assigned source's domain and the
+  search window, returning a compact JSON list of candidate postings (`title, url, published_date,
+  snippet`) annotated with `remote`/`full_time`/`posted_within_7d`/`us_eligible`. If a key is
+  missing the tool returns a clear message and the agent falls back to `WebSearch`.
 
 ### 2. `WebSearch` (fallback)
 * **Purpose**: Run targeted web queries scoped to the allowed sources (e.g.
@@ -147,7 +168,7 @@ class JobItem(BaseModel):
     key_requirements: list   # List of technical skills
     contact_email: str | None
     contact_phone: str | None
-    source: str              # Portal source: 'LinkedIn', 'Workday', 'Greenhouse', 'Lever', or 'Ashby'
+    source: str              # 'LinkedIn', 'Indeed', 'Glassdoor', 'ZipRecruiter', 'Workday', 'Greenhouse', 'Lever', 'Ashby', 'Dice', 'Wellfound', 'Built In', or 'Company'
     description: str          # Short job description summary
 
 class JobList(BaseModel):

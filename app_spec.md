@@ -10,15 +10,24 @@ It is the source of truth for the work and should be kept in sync with the code.
 
 Reference: https://code.claude.com/docs/en/agent-sdk/overview
 
-The job-finder orchestrator (`backend/agent.py`) researches **remote, full-time** jobs across exactly
-five sources: **LinkedIn (`linkedin.com/jobs`) and the ATS-hosted careers portals Workday
-(`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever
-(`jobs.lever.co`), and Ashby (`jobs.ashbyhq.com`)** (no Glassdoor/Dice/Monster/Indeed/ZipRecruiter —
-aggregator boards are banned). It searches the user's typed
+The job-finder orchestrator (`backend/agent.py`) researches **remote, full-time jobs open to
+US-based candidates** across twelve sources: **LinkedIn, Indeed, Glassdoor, ZipRecruiter** (bulk-scraped
+in one structured `jobspy_search` call per role, plus Google Jobs whose results map to `Company`),
+the **ATS-hosted careers portals Workday (`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io`
+/ `job-boards.greenhouse.io`), Lever (`jobs.lever.co`), Ashby (`jobs.ashbyhq.com`)**, the tech boards
+**Dice (`dice.com`), Wellfound (`wellfound.com`), Built In (`builtin.com`)**, and **`Company`** —
+employer career pages searched on the open web (Exa/Tavily with the known board domains excluded).
+It searches the user's typed
 query as the only role (`DEFAULT_ROLES` — Principal DevOps, Cloud, Kubernetes, SRE — are a fallback
-used only when the query is empty), keeping only postings from the **last 7 days**; the orchestrator runs the searches itself and
-hands batches of candidates to parallel `job_scout` subagents for verification and formatting. The agent is granted the **full built-in toolset** (no MCP integration), with behavior
-intentional and documented.
+used only when the query is empty), keeping only postings from the **last 7 days** (narrowed further
+by the incremental-search checkpoint, below); the orchestrator runs the searches itself and
+hands batches of candidates to parallel `job_scout` subagents (running on **claude-haiku-4-5** for
+cost) for verification and formatting. Candidates carrying `pre_verified=true` (from `jobspy_search`)
+are formatted without any WebFetch. **US-only** is enforced at the tool layer (jobspy is called with
+`country_indeed="USA"` / `location="United States"`; Exa/Tavily results carry a regex-derived
+`us_eligible` bool|null annotation) and in both prompts (drop `us_eligible=false` / country-restricted
+roles; keep unknowns for scout judgment). No US flag is persisted — every stored job is US-eligible
+by construction.
 
 **Built-in tools granted to orchestrator** (per the Agent SDK overview):
 
@@ -30,8 +39,9 @@ intentional and documented.
 | `Bash`        | Run shell commands / scripts |
 | `Glob`        | Find files by glob pattern |
 | `Grep`        | Search file contents |
-| `mcp__jobsearch__exa_search`    | **Primary** job discovery via the Exa search API |
-| `mcp__jobsearch__tavily_search` | **Primary** job discovery via the Tavily search API |
+| `mcp__jobsearch__jobspy_search` | **Primary bulk** discovery: structured scrape of Indeed/LinkedIn/Glassdoor/ZipRecruiter/Google Jobs (python-jobspy), pre-verified results |
+| `mcp__jobsearch__exa_search`    | Job discovery via the Exa search API (non-jobspy sources + fallback) |
+| `mcp__jobsearch__tavily_search` | Job discovery via the Tavily search API (non-jobspy sources + fallback) |
 | `WebSearch`   | Fallback web search when a search-API key is missing |
 | `WebFetch`    | Fetch & parse an individual listing |
 | `Task`        | Spawn the `job_scout` subagent (fan-out) |
@@ -41,11 +51,28 @@ intentional and documented.
 toolset as the orchestrator (`exa_search`, `tavily_search`, `Read`, `Write`, `Edit`, `Bash`,
 `Glob`, `Grep`, `WebSearch`, `WebFetch`, `TodoWrite`).
 
-**Search tooling**: job discovery uses the **Exa** and **Tavily** search APIs, wrapped as
+**Search tooling**: job discovery uses **JobSpy** (open-source `python-jobspy` structured
+scraper — free, no API key) plus the **Exa** and **Tavily** search APIs, all wrapped as
 in-process SDK MCP tools (`backend/search_tools.py`, `create_sdk_mcp_server` → server `jobsearch`)
-and passed via `mcp_servers={"jobsearch": job_search_server}`. Keys come from env `EXA_API_KEY` /
-`TAVILY_API_KEY`. This is the only MCP integration; the former `job_finder_tools` and `puppeteer`
-servers remain removed, and the built-in `WebSearch`/`WebFetch` are kept as a fallback.
+and passed via `mcp_servers={"jobsearch": job_search_server}`. Exa/Tavily keys come from env
+`EXA_API_KEY` / `TAVILY_API_KEY`. This is the only MCP integration; the former `job_finder_tools`
+and `puppeteer` servers remain removed, and the built-in `WebSearch`/`WebFetch` are kept as a fallback.
+
+**Checkpointing & incremental search**: jobs are saved **incrementally per scout batch**
+(`batch_callback` in `main.py`) so the dashboard fills in during the run, and cross-run work is
+never repeated:
+
+- `pull_checkpoints` table (`db.py`): `(id AUTO_PK, user_id, query_normalized, last_run_at,
+  jobs_found, UNIQUE(user_id, query_normalized))`. Written **only after a successful run**
+  (`upsert_pull_checkpoint`); read at the start of `/api/pull` (`get_pull_checkpoint`) to narrow
+  the effective search window to `hours since last run + 12h buffer`, floored at 1 day, capped at
+  the requested `time_period_days` (`_effective_window_days` in `main.py`).
+- **Cross-run URL dedup at zero token cost**: `run_job_finder_agent` loads the user's stored job
+  URLs (`db.get_user_job_urls`) and installs them as the search tools' run context
+  (`search_tools.set_run_context` / `clear_run_context`); all three tools drop already-known URLs
+  before returning (reported as `skipped_known`), and `batch_callback` feeds freshly saved URLs
+  back in via `add_known_urls` — the agent never spends tokens re-verifying known jobs. Safe as
+  module state because `/api/pull` allows a single run at a time.
 
 Implementation: module-level `AGENT_ALLOWED_TOOLS` and `SCOUT_ALLOWED_TOOLS` lists passed to
 `ClaudeAgentOptions(allowed_tools=..., mcp_servers=...)` and the `job_scout` AgentDefinition respectively.

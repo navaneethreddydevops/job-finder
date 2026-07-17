@@ -1,11 +1,12 @@
 # AI Job Finder Application
 
-A full-stack, Claude-powered dashboard that researches LinkedIn and the Workday, Greenhouse, Lever, and Ashby careers portals for **remote, full-time** roles (Principal DevOps / Cloud / Kubernetes / SRE) posted in the **last 7 days**. It features an autonomous agent using the **Claude Agent SDK**, a **FastAPI backend**, and a premium **React UI** complete with a real-time console thought-logger.
+A full-stack, Claude-powered dashboard that researches LinkedIn, Indeed, Glassdoor, ZipRecruiter, the Workday/Greenhouse/Lever/Ashby careers portals, Dice, Wellfound, Built In, and employer career pages for **remote, full-time US** roles posted in the **last 7 days** (narrowing automatically to "since the last run" on repeat searches). It features an autonomous agent using the **Claude Agent SDK**, a **FastAPI backend**, and a premium **React UI** complete with a real-time console thought-logger.
 
 ---
 
 ## Features
-* **Multi-agent Job Finder**: An orchestrator searches every **role × source** pair with the Exa/Tavily tools across **LinkedIn (`linkedin.com/jobs`) and the ATS careers portals Workday (`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io`), Lever (`jobs.lever.co`), and Ashby (`jobs.ashbyhq.com`)**, hands batches of candidates to parallel `job_scout` subagents (via the Task tool) for verification and formatting, then merges and de-duplicates the results.
+* **Multi-agent Job Finder**: An orchestrator first bulk-scrapes **Indeed, LinkedIn, Glassdoor, ZipRecruiter, and Google Jobs** with one structured `jobspy_search` call per role (free, pre-verified results — no page reading), then searches the remaining sources — **Workday (`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io`), Lever (`jobs.lever.co`), Ashby (`jobs.ashbyhq.com`), Dice, Wellfound, Built In, and open-web company career pages** — with the Exa/Tavily tools. It hands batches of candidates to parallel `job_scout` subagents (claude-haiku-4-5, via the Task tool) for verification and formatting, then merges and de-duplicates the results. Only remote, full-time roles open to US-based candidates are kept.
+* **Incremental, checkpointed pulls**: jobs are saved in batches as each scout finishes; a per-user/per-query checkpoint narrows the next run's search window to "since the last successful run", and the search tools automatically skip job URLs already in the database (`skipped_known`) — repeat runs never waste tokens re-verifying known jobs.
 * **User-driven target role**: Every run searches the role typed as the Search Target; the default Principal DevOps / Cloud / Kubernetes / SRE roles are searched only when the query is empty.
 * **Remote + full-time only**: Collects only remote, full-time (FTE) roles; non-remote, contract, temporary, part-time, and internship postings are skipped.
 * **Fresh-only results**: Collects and displays **only jobs posted within the last 7 days**.
