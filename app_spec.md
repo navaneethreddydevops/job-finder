@@ -11,12 +11,15 @@ It is the source of truth for the work and should be kept in sync with the code.
 Reference: https://code.claude.com/docs/en/agent-sdk/overview
 
 The job-finder orchestrator (`backend/agent.py`) researches **remote, full-time jobs open to
-US-based candidates** across twelve sources: **LinkedIn, Indeed, Glassdoor, ZipRecruiter** (bulk-scraped
-in one structured `jobspy_search` call per role, plus Google Jobs whose results map to `Company`),
-the **ATS-hosted careers portals Workday (`*.myworkdayjobs.com`), Greenhouse (`boards.greenhouse.io`
-/ `job-boards.greenhouse.io`), Lever (`jobs.lever.co`), Ashby (`jobs.ashbyhq.com`)**, the tech boards
-**Dice (`dice.com`), Wellfound (`wellfound.com`), Built In (`builtin.com`)**, and **`Company`** —
-employer career pages searched on the open web (Exa/Tavily with the known board domains excluded).
+US-based candidates** across twelve sources, in **priority order**. HIGHEST priority — searched
+first with the deepest effort, and sorted to the top of the dashboard — are the **career
+portals** (`PORTAL_SOURCES`): **Workday (`*.myworkdayjobs.com`), Greenhouse
+(`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever (`jobs.lever.co`), Ashby
+(`jobs.ashbyhq.com`)**, and **`Company`** — employer career pages searched on the open web
+(Exa/Tavily with the known board domains excluded). Next, **LinkedIn, Indeed, Glassdoor,
+ZipRecruiter** (bulk-scraped in one structured `jobspy_search` call per role, plus Google Jobs
+whose results map to `Company`), then the tech boards **Dice (`dice.com`), Wellfound
+(`wellfound.com`), Built In (`builtin.com`)** (`SECONDARY_BOARD_SOURCES`).
 It searches the user's typed
 query as the only role (`DEFAULT_ROLES` — Principal DevOps, Cloud, Kubernetes, SRE — are a fallback
 used only when the query is empty), keeping only postings from the **last 7 days** (narrowed further
@@ -300,6 +303,23 @@ agent run to finish before a single bulk save at the end.
   agent + DB + frontend layers).
 - Batches are best-effort: a malformed scout payload is skipped without failing the run;
   the end-of-run reconciliation pass still captures the merged list.
+
+### Data-quality gate & display ordering
+- **`save_job` quality gate**: a job is persisted only when it has a valid http(s) `url`
+  plus a non-empty `title` and `company`; anything else is dropped with a logged warning
+  (`save_job` returns `None`; `True` = inserted, `False` = updated). There is no
+  synthesized `manual:` URL key — the posting URL is mandatory and is the de-dup key.
+- **URL validity at the tool layer**: `search_tools._is_valid_job_url` filters obvious
+  non-posting URLs (non-http, bare domain roots, search/category/browse/index pages) out
+  of jobspy/Exa/Tavily results before the agent sees them, and `jobspy_search` prefers
+  `job_url_direct` (the employer's apply link) over the board's redirect `job_url` when
+  the direct link is valid. The `JobItem.url` schema and both agent prompts require the
+  exact direct posting URL — never a search-results or board index page.
+- **Display ordering**: `db.get_user_jobs` sorts career-portal jobs
+  (Workday/Greenhouse/Lever/Ashby/Company — must mirror `PORTAL_SOURCES` in `agent.py`)
+  above all other sources via a portable `ORDER BY CASE source`, newest-first within each
+  tier. The dashboard renders the API order; the job modal renders posting/apply links
+  only for `http(s)` URLs.
 
 ---
 
