@@ -80,27 +80,19 @@ DEFAULT_ROLES = [
     "Principal Site Reliability Engineer",
 ]
 
-# The sources the agent searches. The first four are covered in bulk by the structured
-# jobspy_search tool (one call per role, pre-verified results); the rest go through
-# exa_search/tavily_search. "Company" means employer career pages on the open web.
-SEARCH_SOURCES = [
-    "LinkedIn",
-    "Indeed",
-    "Glassdoor",
-    "ZipRecruiter",
-    "Workday",
-    "Greenhouse",
-    "Lever",
-    "Ashby",
-    "Dice",
-    "Wellfound",
-    "Built In",
-    "Company",
-]
+# The sources the agent searches, in priority order. Career portals come FIRST — they
+# link straight to the employer's apply page, so they get the deepest search effort and
+# sort to the top of the dashboard (db.get_user_jobs mirrors PORTAL_SOURCES in its
+# ORDER BY — keep the two lists in sync). "Company" means employer career pages on the
+# open web. The aggregator boards are covered in bulk by the structured jobspy_search
+# tool (one call per role, pre-verified results); everything else goes through
+# exa_search/tavily_search.
+PORTAL_SOURCES = ["Workday", "Greenhouse", "Lever", "Ashby", "Company"]
+SECONDARY_BOARD_SOURCES = ["Dice", "Wellfound", "Built In"]
+JOBSPY_SOURCES = ["LinkedIn", "Indeed", "Glassdoor", "ZipRecruiter"]
 # Sources NOT covered by jobspy — the orchestrator searches these with exa/tavily.
-NON_JOBSPY_SOURCES = [
-    "Workday", "Greenhouse", "Lever", "Ashby", "Dice", "Wellfound", "Built In", "Company",
-]
+NON_JOBSPY_SOURCES = PORTAL_SOURCES + SECONDARY_BOARD_SOURCES
+SEARCH_SOURCES = PORTAL_SOURCES + JOBSPY_SOURCES + SECONDARY_BOARD_SOURCES
 
 
 # Pydantic Schemas for Structured Output
@@ -110,7 +102,13 @@ class JobItem(BaseModel):
     location: str = Field(
         description="The location — should be 'Remote' (only US-eligible remote roles are collected)"
     )
-    url: str = Field(description="The direct job posting link or source URL")
+    url: str = Field(
+        description=(
+            "The EXACT direct job posting URL (http/https) that opens this specific "
+            "job's page — never a search-results, category, or board index page. "
+            "Prefer the employer's ATS/career-page URL over an aggregator redirect."
+        )
+    )
     date_posted: str = Field(
         description="Date posted or found, e.g. '2 hours ago', 'today', '3 days ago'"
     )
@@ -339,7 +337,12 @@ async def _run_job_finder_agent(
             "candidates (us_eligible=false, or the text restricts it to another country/"
             "region, e.g. 'Remote — UK only', 'EU timezones'). For borderline candidates, "
             "KEEP them — dropping a real job is worse than including a borderline one.\n"
-            "For each kept job output: title, company, location='Remote', url, date_posted, "
+            "Also DROP any candidate lacking a valid http(s) url that points at the "
+            "specific posting (never a search/category/board-index page), or whose title "
+            "or company is empty or unknown — do NOT invent placeholder values; the "
+            "backend discards such jobs.\n"
+            "For each kept job output: title, company, location='Remote', url (the exact "
+            "direct posting link), date_posted, "
             "posted_within_7d (true unless the date is clearly older than the window), "
             "key_requirements (list of skills), contact_email, contact_phone, source (one of "
             "'LinkedIn', 'Indeed', 'Glassdoor', 'ZipRecruiter', 'Workday', 'Greenhouse', "
@@ -366,9 +369,9 @@ async def _run_job_finder_agent(
         agents={"job_scout": job_scout},
         allowed_tools=AGENT_ALLOWED_TOOLS,
         mcp_servers={JOB_SEARCH_SERVER_NAME: job_search_server},
-        # Per role: 1 jobspy call + 8 non-jobspy sources x 2 search tools ≈ 17 search
-        # calls, plus parallel scout batches. 150 is generous headroom for the 4-role
-        # default fallback; 80 turns previously starved the fan-out mid-search.
+        # Per role: 8 non-jobspy sources x 2 search tools (portals first) + 1 jobspy
+        # call ≈ 17 search calls, plus parallel scout batches. 150 is generous headroom
+        # for the 4-role default fallback; 80 turns previously starved the fan-out.
         max_turns=150,
         output_format=JobList.model_json_schema(),
         permission_mode="bypassPermissions",
@@ -384,7 +387,8 @@ async def _run_job_finder_agent(
     # Keyword string for search queries: job types + "remote", de-duplicated in order
     # (job_type_str usually already contains "remote").
     query_keywords = " ".join(dict.fromkeys(f"{job_type_str} remote".split()))
-    non_jobspy_text = ", ".join(NON_JOBSPY_SOURCES)
+    portal_sources_text = ", ".join(PORTAL_SOURCES)
+    board_sources_text = ", ".join(SECONDARY_BOARD_SOURCES)
     prompt = (
         f"Find as many {job_type_str} jobs open to US-based candidates as possible, posted "
         f"between {since_date} and {run_date} (last {time_period_days} days). There is NO "
@@ -396,7 +400,17 @@ async def _run_job_finder_agent(
         f"(reported as skipped_known) and are scoped to postings since {since_date} — do "
         f"not re-search or re-verify older postings; focus on new results.\n\n"
         f"For EVERY role:\n"
-        f"1. FIRST call jobspy_search(search_term='<role>', "
+        f"1. HIGHEST PRIORITY — career portals. For the role x each of "
+        f"{portal_sources_text}, run BOTH search tools (they return different results; "
+        f"skipping one loses jobs):\n"
+        f"   exa_search(query='<role> {query_keywords}', source='<source>', "
+        f"time_period_days={time_period_days})\n"
+        f"   tavily_search(query='<role> {query_keywords}', source='<source>', "
+        f"time_period_days={time_period_days})\n"
+        f"   These return direct employer apply links — spend your deepest effort here. "
+        f"For source='Company' the tools search employer career pages on the open web; "
+        f"use a query like '<role> {query_keywords} careers apply'.\n"
+        f"2. THEN call jobspy_search(search_term='<role>', "
         f"time_period_days={time_period_days}) ONCE — it covers LinkedIn, Indeed, "
         f"Glassdoor, ZipRecruiter, and Google Jobs in a single call and returns "
         f"pre-verified candidates (pre_verified=true). Never WebFetch those.\n"
@@ -404,29 +418,27 @@ async def _run_job_finder_agent(
         f"time_period_days={time_period_days}) ONCE per role — SerpAPI's Google Jobs "
         f"engine returns additional pre-verified candidates (pre_verified=true) that "
         f"jobspy misses. Never WebFetch those either.\n"
-        f"2. THEN, for the role x each remaining source ({non_jobspy_text}), run BOTH "
-        f"search tools (they return different results; skipping one loses jobs):\n"
-        f"   exa_search(query='<role> {query_keywords}', source='<source>', "
-        f"time_period_days={time_period_days})\n"
-        f"   tavily_search(query='<role> {query_keywords}', source='<source>', "
-        f"time_period_days={time_period_days})\n"
-        f"   For source='Company' the tools search employer career pages on the open web; "
-        f"use a query like '<role> {query_keywords} careers apply'.\n"
-        f"3. Only if jobspy_search fails or returns an error, rely on serpapi_search "
+        f"3. THEN, for the role x each remaining board ({board_sources_text}), run BOTH "
+        f"exa_search and tavily_search as in step 1.\n"
+        f"4. Only if jobspy_search fails or returns an error, rely on serpapi_search "
         f"first, then fall back to exa_search/tavily_search with source='LinkedIn'/"
         f"'Indeed'/'Glassdoor'/'ZipRecruiter'.\n"
-        f"4. If a role x source pair returned fewer than 5 candidates, retry ONCE with a "
+        f"5. If a role x source pair returned fewer than 5 candidates, retry ONCE with a "
         f"broader query variation (drop the seniority qualifier — e.g. 'Principal'/"
         f"'Senior'/'Staff' — or use a close synonym of the role title), then move on.\n"
-        f"5. Keep candidates where posted_within_7d is true or null, remote is not false, "
+        f"6. Keep candidates where posted_within_7d is true or null, remote is not false, "
         f"full_time is not false, and us_eligible is not false (jobs must be open to "
         f"US-based candidates — drop 'Remote, UK only'-style roles). When a field is null, "
-        f"keep the candidate — the scout verifies borderline cases.\n"
-        f"6. As soon as you have 30-40 kept candidates, spawn a job_scout to verify + format "
+        f"keep the candidate — the scout verifies borderline cases. Drop any candidate "
+        f"whose url is not a working direct job-posting link (search pages, category/"
+        f"browse pages, board home pages). Every returned job MUST have a valid http(s) "
+        f"url plus a non-empty title and company — the backend discards jobs missing "
+        f"any of these.\n"
+        f"7. As soon as you have 30-40 kept candidates, spawn a job_scout to verify + format "
         f"that batch, and run multiple scouts IN PARALLEL while you keep searching. Pass each "
         f"scout the full candidate data including the remote/full_time/posted_within_7d/"
         f"us_eligible/pre_verified annotations, salary fields, and the source name.\n"
-        f"7. Merge all scout outputs, de-duplicate by URL only (same role at different "
+        f"8. Merge all scout outputs, de-duplicate by URL only (same role at different "
         f"companies is NOT a duplicate), and return the COMPLETE merged list — never "
         f"truncate or summarize it.\n\n"
         f'Return ONLY a JSON object of the form {{"jobs": [ ... ]}} with every job found.'

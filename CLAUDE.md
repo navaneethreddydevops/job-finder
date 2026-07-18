@@ -104,11 +104,13 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
 
 - The orchestrator searches ONLY the user's Search Target query as the role; `DEFAULT_ROLES`
   (Principal DevOps / Cloud / Kubernetes / Site Reliability Engineer) are used solely as a
-  fallback when the query is empty. Per role it FIRST calls `jobspy_search` once (one structured
-  call covers Indeed/LinkedIn/Glassdoor/ZipRecruiter/Google Jobs and returns `pre_verified=true`
-  candidates — the main token saver), then searches the role × each remaining source
-  (Workday, Greenhouse, Lever, Ashby, Dice, Wellfound, Built In, Company) itself with the
-  Exa/Tavily tools (in-process SDK MCP tools can't be granted to subagents), then spawns
+  fallback when the query is empty. Per role it FIRST searches the **career portals**
+  (`PORTAL_SOURCES`: Workday, Greenhouse, Lever, Ashby, Company) itself with the Exa/Tavily
+  tools (in-process SDK MCP tools can't be granted to subagents) — highest priority, deepest
+  effort, direct employer apply links — THEN calls `jobspy_search` once (one structured call
+  covers Indeed/LinkedIn/Glassdoor/ZipRecruiter/Google Jobs and returns `pre_verified=true`
+  candidates — the main token saver), THEN covers the secondary boards
+  (`SECONDARY_BOARD_SOURCES`: Dice, Wellfound, Built In) with both search tools, then spawns
   `job_scout` subagents in parallel (via the built-in **Task** tool) to verify + format batches
   of 30-40 candidates, and finally merges and de-duplicates the results. Scouts must NEVER
   WebFetch `pre_verified=true` candidates — those are format-only.
@@ -141,12 +143,16 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
 The agent researches the user's Search Target query as the only role; `DEFAULT_ROLES` in
 `agent.py` (Principal DevOps / Cloud / Kubernetes / Site Reliability Engineer) are a fallback
 used only when the query is empty — never added on top of a typed query. Sources are fixed to
-the 12 entries of `SEARCH_SOURCES` in `agent.py`: **LinkedIn, Indeed, Glassdoor, ZipRecruiter**
-(covered in bulk by `jobspy_search`, which also scrapes Google Jobs — those results map to
-`Company`), the **ATS-hosted careers portals Workday (`*.myworkdayjobs.com`), Greenhouse
+the 12 entries of `SEARCH_SOURCES` in `agent.py`, in **priority order** (user request 2026-07):
+the **ATS-hosted careers portals Workday (`*.myworkdayjobs.com`), Greenhouse
 (`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever (`jobs.lever.co`), Ashby
-(`jobs.ashbyhq.com`)**, **Dice, Wellfound, Built In**, and **`Company`** — employer career pages
-searched on the open web (Exa/Tavily with the known board domains excluded). The aggregator
+(`jobs.ashbyhq.com`)** and **`Company`** — employer career pages searched on the open web
+(Exa/Tavily with the known board domains excluded) — are `PORTAL_SOURCES`, the HIGHEST
+priority: searched first and most deeply, and sorted to the top of the dashboard
+(`db.get_user_jobs` mirrors the list in its `ORDER BY` — keep them in sync). Then
+**LinkedIn, Indeed, Glassdoor, ZipRecruiter** (covered in bulk by `jobspy_search`, which also
+scrapes Google Jobs — those results map to `Company`), then **Dice, Wellfound, Built In**
+(`SECONDARY_BOARD_SOURCES`). The aggregator
 boards were deliberately re-added at the user's request (2026-07) because JobSpy's structured
 scraping fixes the old reliability problems; Monster remains out. The `source` field is one of
 `'LinkedIn'`, `'Indeed'`, `'Glassdoor'`, `'ZipRecruiter'`, `'Workday'`, `'Greenhouse'`,
@@ -243,11 +249,15 @@ SDK MCP tools** (`create_sdk_mcp_server` → server name `jobsearch`):
   lives in `db.ensure_users_table()` (called by both `init_db` and `auth.init_auth_db`), and
   modules that self-init at import with FKs to `jobs`/`applications` call `init_db()` first.
   Tables auto-create on boot, so a fresh Neon DB needs no manual migration.
-- De-duplication keys on the posting **URL**; when a job has no URL, a stable key is
-  synthesized from `title|company|location` so URL-less jobs don't collide on the
-  `UNIQUE(url)` constraint and collapse into one row.
-- `save_job` preserves the existing `applied` status on update and returns `True` only
-  when a new row was inserted.
+- De-duplication keys on the posting **URL**, which is mandatory: `save_job` enforces a
+  **quality gate** — a job without a valid http(s) URL or with an empty title/company is
+  DROPPED (returns `None`, logs the drop) instead of stored. There is no synthesized
+  `manual:` key anymore; a job without a real posting link is useless in the dashboard.
+- `save_job` preserves the existing `applied` status on update; it returns `True` for a
+  new insert, `False` for an update, `None` for a quality-gate drop.
+- `get_user_jobs` sorts **career-portal jobs first** (Workday/Greenhouse/Lever/Ashby/
+  Company via a portable `ORDER BY CASE source`, newest-first within each tier) — the
+  tier list must mirror `PORTAL_SOURCES` in `agent.py`.
 
 ## Backend API (`backend/main.py`)
 

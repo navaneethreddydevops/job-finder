@@ -192,7 +192,10 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
                 try:
                     if save_job(job_dict, user_id):
                         inserted += 1
-                    saved_urls.append(job_dict.get("url"))
+                    url = job_dict.get("url") or ""
+                    # Dropped jobs (no valid URL) must not enter the known-urls context.
+                    if url.startswith(("http://", "https://")):
+                        saved_urls.append(url)
                 except Exception:
                     pass
             total_jobs_count += inserted
@@ -248,7 +251,8 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
             updated_count = len(jobs_list) - inserted_count
             await publish_log(
                 f"\n[Backend] Reconciliation: agent's final merged list had {len(jobs_list)} jobs — "
-                f"{inserted_count} new, {updated_count} already saved from a batch. Database now holds "
+                f"{inserted_count} new, {updated_count} already saved from a batch or dropped by the "
+                f"quality gate. Database now holds "
                 f"{len(get_user_jobs(user_id))} total jobs.\n"
             )
             # Checkpoint ONLY on success: the next run for this query narrows its
