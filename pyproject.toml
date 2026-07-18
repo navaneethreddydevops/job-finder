@@ -21,4 +21,5 @@ dependencies = [
     "python-jobspy>=1.1.82",
     "python-multipart>=0.0.9",
     "requests>=2.34.2",
+    "serpapi>=1.0.2",
 ]

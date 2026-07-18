@@ -17,14 +17,16 @@ from claude_agent_sdk.types import (
     ResultMessage,
 )
 
-# JobSpy + Exa + Tavily search tools (in-process SDK MCP server). The orchestrator calls
-# these to fetch job listings with far better recall than the built-in WebSearch.
+# JobSpy + SerpAPI + Exa + Tavily search tools (in-process SDK MCP server). The
+# orchestrator calls these to fetch job listings with far better recall than the
+# built-in WebSearch.
 from search_tools import (
     job_search_server,
     JOB_SEARCH_SERVER_NAME,
     EXA_TOOL,
     TAVILY_TOOL,
     JOBSPY_TOOL,
+    SERPAPI_TOOL,
     set_run_context,
     clear_run_context,
 )
@@ -45,9 +47,10 @@ os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 # the Exa + Tavily search tools (in-process SDK MCP server `jobsearch`), with WebFetch
 # as fallback for verifying individual listings.
 AGENT_ALLOWED_TOOLS = [
-    # Job search (JobSpy structured scraping + Exa + Tavily, via the in-process
-    # `jobsearch` MCP server)
+    # Job search (JobSpy structured scraping + SerpAPI Google Jobs + Exa + Tavily,
+    # via the in-process `jobsearch` MCP server)
     JOBSPY_TOOL,
+    SERPAPI_TOOL,
     EXA_TOOL,
     TAVILY_TOOL,
     # Web operations (fallback verification only)
@@ -397,6 +400,10 @@ async def _run_job_finder_agent(
         f"time_period_days={time_period_days}) ONCE — it covers LinkedIn, Indeed, "
         f"Glassdoor, ZipRecruiter, and Google Jobs in a single call and returns "
         f"pre-verified candidates (pre_verified=true). Never WebFetch those.\n"
+        f"   ALSO call serpapi_search(search_term='<role>', "
+        f"time_period_days={time_period_days}) ONCE per role — SerpAPI's Google Jobs "
+        f"engine returns additional pre-verified candidates (pre_verified=true) that "
+        f"jobspy misses. Never WebFetch those either.\n"
         f"2. THEN, for the role x each remaining source ({non_jobspy_text}), run BOTH "
         f"search tools (they return different results; skipping one loses jobs):\n"
         f"   exa_search(query='<role> {query_keywords}', source='<source>', "
@@ -405,8 +412,9 @@ async def _run_job_finder_agent(
         f"time_period_days={time_period_days})\n"
         f"   For source='Company' the tools search employer career pages on the open web; "
         f"use a query like '<role> {query_keywords} careers apply'.\n"
-        f"3. Only if jobspy_search fails or returns an error, fall back to exa_search/"
-        f"tavily_search with source='LinkedIn'/'Indeed'/'Glassdoor'/'ZipRecruiter'.\n"
+        f"3. Only if jobspy_search fails or returns an error, rely on serpapi_search "
+        f"first, then fall back to exa_search/tavily_search with source='LinkedIn'/"
+        f"'Indeed'/'Glassdoor'/'ZipRecruiter'.\n"
         f"4. If a role x source pair returned fewer than 5 candidates, retry ONCE with a "
         f"broader query variation (drop the seniority qualifier — e.g. 'Principal'/"
         f"'Senior'/'Staff' — or use a close synonym of the role title), then move on.\n"
