@@ -732,14 +732,6 @@ function Dashboard() {
         )}
 
         <div className="header-actions">
-          {/* Backend status */}
-          <div className="header-status-corner">
-            <div className={`health-pill ${healthStatus}`} title={`Backend ${healthStatus === 'ok' ? 'online' : healthStatus === 'error' ? 'offline' : 'checking'}`}>
-              <div className="health-dot" />
-              <span>{healthStatus === 'ok' ? 'Online' : healthStatus === 'error' ? 'Offline' : '…'}</span>
-            </div>
-          </div>
-
           {/* Primary navigation */}
           <Link to="/resume/optimizer" className="btn nav-link" title="Resume Optimizer">
             <FileText size={16} />
@@ -1427,6 +1419,18 @@ function Dashboard() {
           )}
         </main>
       </div>
+
+      {/* ── System status footer (githubstatus.com style) ──────────────────── */}
+      <footer className="status-footer" id="system-status-footer">
+        <div className={`status-banner ${healthStatus}`} role="status">
+          <span className="status-banner-dot" />
+          <span className="status-banner-text">
+            {healthStatus === 'ok' ? 'All Systems Operational'
+              : healthStatus === 'error' ? 'System Outage — Backend Unreachable'
+              : 'Checking System Status…'}
+          </span>
+        </div>
+      </footer>
 
       {/* ── Job Details Dialog ─────────────────────────────────────────────── */}
       <dialog
