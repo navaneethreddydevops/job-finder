@@ -1681,38 +1681,55 @@ dialog.job-details-dialog[open]::backdrop {
   color: var(--text-primary);
 }
 
-/* System status footer banner (githubstatus.com style) */
-.status-footer {
-  margin-top: auto;
-  padding-top: 2.5rem;
+/* Centered footer system-status indicator */
+.app-footer {
   display: flex;
   justify-content: center;
-  width: 100%;
-}
-
-.status-banner {
-  display: flex;
   align-items: center;
-  gap: 0.6rem;
-  width: 100%;
-  max-width: 720px;
-  padding: 1rem 1.25rem;
-  border-radius: 8px;
-  font-size: 0.95rem;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: #fff;
-  background: var(--text-muted);
-  transition: background 0.3s ease;
+  padding: 2rem 1rem 1.5rem;
+  margin-top: 2.5rem;
+  border-top: 1px solid var(--border);
 }
-.status-banner.ok { background: #2fbf71; }
-.status-banner.error { background: var(--danger); }
-
-.status-banner-dot {
-  width: 9px; height: 9px;
+.status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.status-indicator .status-label {
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--text-muted);
+}
+.status-dot-wrap {
+  position: relative;
+  display: inline-flex;
+  width: 8px;
+  height: 8px;
+}
+.status-dot {
+  position: relative;
+  display: inline-flex;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.9);
-  flex-shrink: 0;
+  background: var(--success);
+}
+.status-dot-ping {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--success);
+  opacity: 0.6;
+  animation: status-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.status-indicator.error .status-dot,
+.status-indicator.error .status-dot-ping { background: var(--danger); }
+.status-indicator.unknown .status-dot { background: var(--text-muted); }
+.status-indicator.unknown .status-dot-ping { display: none; }
+@keyframes status-ping {
+  75%, 100% { transform: scale(2.5); opacity: 0; }
 }
 
 /* Agent active badge */

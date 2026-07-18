@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 from collections import deque
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, Request
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,6 +15,7 @@ from agent import run_job_finder_agent, ALLOWED_MODELS, DEFAULT_MODEL
 from search_tools import add_known_urls
 from db import (
     init_db,
+    get_db_connection,
     save_job,
     get_user_jobs,
     toggle_applied,
@@ -324,10 +325,36 @@ async def clear_jobs(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Error clearing database: {e}")
 
 
+def _check_database() -> bool:
+    try:
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        finally:
+            conn.close()
+        return True
+    except Exception as e:
+        print(f"Health check: database unreachable: {e}", file=sys.stderr)
+        return False
+
+
 @app.get("/api/health")
-async def health_check():
-    """Returns the health status of the backend."""
-    return {"status": "ok"}
+async def health_check(response: Response):
+    """Real health status: exercises the database, reports per-component state."""
+    db_ok = await asyncio.to_thread(_check_database)
+    operational = db_ok
+    if not operational:
+        response.status_code = 503
+    return {
+        "status": "operational" if operational else "degraded",
+        "components": {
+            "api": "ok",
+            "database": "ok" if db_ok else "error",
+        },
+        "agent": agent_status.get("status", "idle"),
+    }
 
 
 @app.get("/api/status")

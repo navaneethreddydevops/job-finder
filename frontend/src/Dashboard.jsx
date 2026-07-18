@@ -439,7 +439,8 @@ function Dashboard() {
     const check = async () => {
       try {
         const resp = await fetch(apiUrl('/api/health'));
-        setHealthStatus(resp.ok ? 'ok' : 'error');
+        const data = await resp.json().catch(() => null);
+        setHealthStatus(resp.ok && data?.status === 'operational' ? 'ok' : 'error');
       } catch { setHealthStatus('error'); }
     };
     check();
@@ -1420,18 +1421,6 @@ function Dashboard() {
         </main>
       </div>
 
-      {/* ── System status footer (githubstatus.com style) ──────────────────── */}
-      <footer className="status-footer" id="system-status-footer">
-        <div className={`status-banner ${healthStatus}`} role="status">
-          <span className="status-banner-dot" />
-          <span className="status-banner-text">
-            {healthStatus === 'ok' ? 'All Systems Operational'
-              : healthStatus === 'error' ? 'System Outage — Backend Unreachable'
-              : 'Checking System Status…'}
-          </span>
-        </div>
-      </footer>
-
       {/* ── Job Details Dialog ─────────────────────────────────────────────── */}
       <dialog
         ref={dialogRef}
@@ -1537,6 +1526,22 @@ function Dashboard() {
           </>
         )}
       </dialog>
+
+      <footer className="app-footer" id="app-footer">
+        <span className={`status-indicator ${healthStatus}`} id="footer-status-indicator">
+          <span className="status-dot-wrap" aria-hidden="true">
+            <span className="status-dot-ping" />
+            <span className="status-dot" />
+          </span>
+          <span className="status-label">
+            {healthStatus === 'ok'
+              ? 'All systems operational'
+              : healthStatus === 'error'
+                ? 'Systems experiencing issues'
+                : 'Checking systems…'}
+          </span>
+        </span>
+      </footer>
     </div>
   );
 }
