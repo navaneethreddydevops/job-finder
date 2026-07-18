@@ -15,6 +15,7 @@ const ResumeOptimizer = lazy(() => import('./pages/ResumeOptimizer.jsx'));
 const Analytics = lazy(() => import('./pages/Analytics.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
 import { SpeedInsights } from '@vercel/speed-insights/react';
+import { Analytics as VercelAnalytics } from '@vercel/analytics/react';
 
 function RequireAuth({ children }) {
   const { token, loading } = useAuth();
@@ -109,6 +110,7 @@ function App() {
           <AppContent />
         </BrowserRouter>
         <SpeedInsights />
+        <VercelAnalytics />
       </ToastProvider>
     </AuthProvider>
   );

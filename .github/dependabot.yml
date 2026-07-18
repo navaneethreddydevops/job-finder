@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Security updates only (open-pull-requests-limit: 0 disables scheduled
+  # version-update PRs while keeping security updates enabled).
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    ignore:
+      # python-jobspy pins markdownify <0.14.0, so the 0.14.1 security update
+      # can never resolve — attempting it just fails the Dependabot workflow.
+      # Drop this once python-jobspy allows markdownify >=0.14.1.
+      - dependency-name: "markdownify"
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0

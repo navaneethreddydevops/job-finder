@@ -685,6 +685,33 @@ body {
   opacity: 0.5;
 }
 
+/* Model picker pills — extend .time-preset with a two-line label + hint layout. */
+.model-presets {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.model-preset {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.45rem 0.3rem;
+}
+
+.model-preset-label {
+  font-weight: 600;
+}
+
+.model-preset-hint {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+.model-preset.active .model-preset-hint {
+  color: rgba(255, 255, 255, 0.8);
+}
+
 /* Buttons */
 .btn {
   display: inline-flex;

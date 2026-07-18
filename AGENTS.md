@@ -38,8 +38,14 @@ API key. See `render.yaml`, `backend/Dockerfile.render`, and the README "Cloud D
 
 The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
 
-* **Model**: `claude-sonnet-5` for the orchestrator; `claude-haiku-4-5` for the `job_scout`
-  subagents (mechanical verify+format work — ~3x cheaper per token).
+* **Model**: user-selectable from the dashboard's Model picker for the orchestrator —
+  one of `ALLOWED_MODELS` in `agent.py` (`claude-fable-5`, `claude-opus-4-8`,
+  `claude-sonnet-5`, `claude-haiku-4-5`), default `claude-sonnet-5`; the choice flows
+  through `POST /api/pull` (`model` field, validated with fallback to the default) and
+  persists client-side in localStorage `jf_model`. The `job_scout` subagents stay pinned
+  to `claude-haiku-4-5` (mechanical verify+format work — ~3x cheaper per token), and the
+  resume optimizer stays on `claude-sonnet-5` — the picker affects only the job-finder
+  orchestrator.
 * **max_turns**: `150` (per role: 8 non-jobspy sources × 2 search tools — portals first —
   plus 1 jobspy call and parallel scout batches).
 * **permission_mode**: `bypassPermissions`.

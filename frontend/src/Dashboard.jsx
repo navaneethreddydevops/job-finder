@@ -39,6 +39,17 @@ import { Heart } from 'lucide-react';
 // (backend/main.py) so the live view and a post-refresh replay show the same tail.
 const LOG_LINES_MAX = 1500;
 
+// Claude models the user can pick for the job-finder ORCHESTRATOR run. Mirrors
+// ALLOWED_MODELS in backend/agent.py — keep the two lists in sync. The job_scout
+// subagent and the resume optimizer are unaffected by this selection.
+const CLAUDE_MODELS = [
+  { id: 'claude-fable-5', label: 'Fable 5', hint: 'Most capable' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8', hint: 'Powerful' },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', hint: 'Balanced' },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', hint: 'Fastest' },
+];
+const DEFAULT_MODEL = 'claude-sonnet-5';
+
 function timeAgo(isoStr) {
   if (!isoStr) return null;
   const diff = (Date.now() - new Date(isoStr).getTime()) / 1000;
@@ -103,6 +114,10 @@ function Dashboard() {
   // Search customization state
   const [jobTypes, setJobTypes] = useState(new Set(['fulltime', 'remote']));
   const [timePeriodDays, setTimePeriodDays] = useState(7);
+  const [model, setModel] = useState(() => {
+    const stored = localStorage.getItem('jf_model');
+    return CLAUDE_MODELS.some((m) => m.id === stored) ? stored : DEFAULT_MODEL;
+  });
 
   // filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -140,7 +155,7 @@ function Dashboard() {
   stateRef.current = {
     jobs, filteredJobs: [],
     query, status, logs, searchTerm,
-    selectedLocation, selectedSource, selectedApplied, selectedJob,
+    selectedLocation, selectedSource, selectedApplied, selectedJob, model,
   };
 
   // ── freshness filter ────────────────────────────────────────────────────────
@@ -343,6 +358,7 @@ function Dashboard() {
             query: queryValue,
             job_types: Array.from(jobTypes),
             time_period_days: timePeriodDays,
+            model,
           }),
         });
         if (resp.ok) {
@@ -436,6 +452,11 @@ function Dashboard() {
   useEffect(() => {
     localStorage.setItem('jf_view_mode', viewMode);
   }, [viewMode]);
+
+  // persist the selected orchestrator model
+  useEffect(() => {
+    localStorage.setItem('jf_model', model);
+  }, [model]);
 
   // status polling while running
   useEffect(() => {
@@ -629,7 +650,7 @@ function Dashboard() {
             if (!q) return { success: false, error: 'Search query required' };
             setQuery(q); setLogs([]);
             try {
-              const resp = await apiFetch('/api/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: q }) });
+              const resp = await apiFetch('/api/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: q, model: stateRef.current.model }) });
               if (resp.ok) { setStatus({ status: 'running', query: q }); setAgentStartTime(performance.now()); setConsoleOpen(true); startStreaming(); return { success: true, message: `Scraper initiated for '${q}'` }; }
               const e = await resp.json();
               return { success: false, error: e.detail || 'Scraper call failed' };
@@ -901,6 +922,26 @@ function Dashboard() {
                     disabled={status.status === 'running'}
                   >
                     {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Model Selection */}
+            <div className="search-option-group" id="model-select-group">
+              <span className="control-label">Model</span>
+              <div className="time-presets model-presets">
+                {CLAUDE_MODELS.map(({ id, label, hint }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className={`time-preset model-preset ${model === id ? 'active' : ''}`}
+                    onClick={() => setModel(id)}
+                    disabled={status.status === 'running'}
+                    title={`${id} — ${hint}`}
+                  >
+                    <span className="model-preset-label">{label}</span>
+                    <span className="model-preset-hint">{hint}</span>
                   </button>
                 ))}
               </div>

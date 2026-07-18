@@ -123,10 +123,19 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
   - **Web operations**: `WebSearch`, `WebFetch` — fallback search + reading individual listings
   - **Agent control**: `Task` (orchestrator only), `TodoWrite` — for orchestration and planning
   - The only MCP integration is the in-process `jobsearch` server (JobSpy + Exa + Tavily). No external MCP servers.
-- `model="claude-sonnet-5"` for the orchestrator (and the resume optimizer in `resume.py`);
-  the `job_scout` subagent runs on **`claude-haiku-4-5`** — scouts do mechanical verify+format
-  work (and skip WebFetch entirely for pre-verified jobspy batches), so the smaller model cuts
-  cost ~3x with no recall loss. `permission_mode="bypassPermissions"`.
+- **Orchestrator model is user-selectable** from the dashboard's Model picker
+  (`#model-select-group` in `Dashboard.jsx`, persisted in localStorage `jf_model`): one of
+  `ALLOWED_MODELS` in `agent.py` — `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`,
+  `claude-haiku-4-5` — default `DEFAULT_MODEL` = `claude-sonnet-5`. The choice flows through
+  `POST /api/pull` (`model` field; validated against the allowlist with fallback to the
+  default so old clients keep working) → `run_agent_task` → `run_job_finder_agent(model=...)`,
+  and is reflected in `agent_status["model"]` (`/api/status`). The selection applies **only to
+  the job-finder orchestrator** (user decision 2026-07): the resume optimizer in `resume.py`
+  stays on `claude-sonnet-5`, and the `job_scout` subagent stays pinned to
+  **`claude-haiku-4-5`** — scouts do mechanical verify+format work (and skip WebFetch
+  entirely for pre-verified jobspy batches), so the smaller model cuts cost ~3x with no
+  recall loss. Keep the frontend `CLAUDE_MODELS` list (Dashboard.jsx) in sync with
+  `ALLOWED_MODELS`. `permission_mode="bypassPermissions"`.
 - **Structured output** is enforced via `output_format=JobList.model_json_schema()`. If
   `msg.structured_output` is absent, the final `msg.result` is parsed with the tolerant
   `_extract_jobs_from_text` helper (handles ```json fences, **bare/unfenced arrays**,
