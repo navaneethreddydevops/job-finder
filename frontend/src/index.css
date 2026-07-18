@@ -109,12 +109,6 @@ body {
   flex-wrap: wrap;
 }
 
-/* Backend status (inline in header actions) */
-.header-status-corner {
-  display: flex;
-  align-items: center;
-}
-
 .app-header::after { content: none; }
 
 .logo-section {
@@ -1660,27 +1654,38 @@ dialog.job-details-dialog[open]::backdrop {
   color: var(--text-primary);
 }
 
-/* Compact backend health pill */
-.health-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 0.25rem 0.6rem;
-  border-radius: 9999px;
-  border: 1px solid var(--border);
-  background: var(--bg-subtle);
-  color: var(--text-muted);
-  letter-spacing: 0.01em;
+/* System status footer banner (githubstatus.com style) */
+.status-footer {
+  margin-top: auto;
+  padding-top: 2.5rem;
+  display: flex;
+  justify-content: center;
+  width: 100%;
 }
-.health-pill.ok { color: var(--success); background: rgba(219,237,219,0.45); border-color: rgba(42,126,79,0.25); }
-.health-pill.error { color: var(--danger); background: rgba(224,62,62,0.07); border-color: rgba(224,62,62,0.25); }
 
-.health-dot {
-  width: 7px; height: 7px;
+.status-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  max-width: 720px;
+  padding: 1rem 1.25rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: #fff;
+  background: var(--text-muted);
+  transition: background 0.3s ease;
+}
+.status-banner.ok { background: #2fbf71; }
+.status-banner.error { background: var(--danger); }
+
+.status-banner-dot {
+  width: 9px; height: 9px;
   border-radius: 50%;
-  background: currentColor;
+  background: rgba(255, 255, 255, 0.9);
+  flex-shrink: 0;
 }
 
 /* Agent active badge */

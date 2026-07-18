@@ -360,10 +360,12 @@ All enhancements are tracked in this spec as implementation acceptance criteria
 - ☐ `UserMenu` trigger is at least 36px tall, shows a colored avatar initial circle
   (using `--primary` background) and the user's first name next to it, making it
   unmistakably interactive.
-- ☐ The backend status pill (`Backend: Online`) is moved to a more compact indicator
-  (a small coloured dot + label, right-aligned) so it doesn't compete with the
-  primary nav actions.
-- ☐ Header adapts to ≤ 640px: logo + status pill left, user menu right — action
+- ☑ Backend health is shown as a **bottom-center status banner**
+  (githubstatus.com style, `#system-status-footer` / `.status-banner` at the end of
+  the dashboard's `app-container`): green "All Systems Operational" when
+  `/api/health` is OK, red "System Outage — Backend Unreachable" on failure, gray
+  "Checking System Status…" while unknown. The old header health pill was removed.
+- ☐ Header adapts to ≤ 640px: logo left, user menu right — action
   buttons collapse into the user dropdown.
 
 ---
