@@ -80,6 +80,18 @@ DEFAULT_ROLES = [
     "Principal Site Reliability Engineer",
 ]
 
+# Models the dashboard may select for the ORCHESTRATOR only. The job_scout subagent
+# stays pinned to claude-haiku-4-5 (mechanical verify+format work) and the resume
+# optimizer stays on claude-sonnet-5 — user decision 2026-07: model selection applies
+# only to the job-finder orchestrator. Unknown values fall back to DEFAULT_MODEL.
+DEFAULT_MODEL = "claude-sonnet-5"
+ALLOWED_MODELS = [
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+]
+
 # The sources the agent searches, in priority order. Career portals come FIRST — they
 # link straight to the employer's apply page, so they get the deepest search effort and
 # sort to the top of the dashboard (db.get_user_jobs mirrors PORTAL_SOURCES in its
@@ -223,6 +235,7 @@ async def run_job_finder_agent(
     batch_callback=None,
     job_types: list[str] = None,
     time_period_days: int = 7,
+    model: str = None,
 ):
     """Logfire-traced wrapper around the agent run (see `_run_job_finder_agent`).
 
@@ -238,6 +251,7 @@ async def run_job_finder_agent(
         job_types=job_types or ["fulltime", "remote"],
         time_period_days=time_period_days,
         is_resume=is_resume,
+        model=model or DEFAULT_MODEL,
     ) as span:
         data = await _run_job_finder_agent(
             query=query,
@@ -248,6 +262,7 @@ async def run_job_finder_agent(
             batch_callback=batch_callback,
             job_types=job_types,
             time_period_days=time_period_days,
+            model=model,
         )
         jobs = data.get("jobs") if isinstance(data, dict) else None
         span.set_attribute("jobs_found", len(jobs) if isinstance(jobs, list) else 0)
@@ -263,6 +278,7 @@ async def _run_job_finder_agent(
     batch_callback=None,
     job_types: list[str] = None,
     time_period_days: int = 7,
+    model: str = None,
 ):
     """Initializes and executes the job finder agent using the claude-agent-sdk.
 
@@ -285,12 +301,16 @@ async def _run_job_finder_agent(
         job_types: List of job types to search for. Supported values: "fulltime", "remote", "contract".
             Defaults to ["fulltime", "remote"].
         time_period_days: Number of days to search back. Range: 1-90 (1 = last 24 hrs). Defaults to 7.
+        model: Orchestrator model id, one of ALLOWED_MODELS (dashboard-selected).
+            Unknown/None falls back to DEFAULT_MODEL. Does not affect the job_scout subagent.
     """
 
     from datetime import datetime, timezone, timedelta
 
     if job_types is None:
         job_types = ["fulltime", "remote"]
+
+    model = model if model in ALLOWED_MODELS else DEFAULT_MODEL
 
     # Clamp time_period_days to 1-90 range (1 = last 24 hours)
     time_period_days = max(1, min(90, time_period_days))
@@ -310,7 +330,7 @@ async def _run_job_finder_agent(
     if log_callback:
         await log_callback(
             f"[Agent] Starting job research for roles: {roles_text} "
-            f"(job types: {job_types_text}; sources: {sources_text}; posted in last {time_period_days} days)...\n"
+            f"(model: {model}; job types: {job_types_text}; sources: {sources_text}; posted in last {time_period_days} days)...\n"
         )
 
     # Format job types for search queries (needed by the scout definition below).
@@ -365,7 +385,7 @@ async def _run_job_finder_agent(
     options = ClaudeAgentOptions(
         session_id=effective_session_id if not is_resume else None,
         resume=effective_session_id if is_resume else None,
-        model="claude-sonnet-5",
+        model=model,
         agents={"job_scout": job_scout},
         allowed_tools=AGENT_ALLOWED_TOOLS,
         mcp_servers={JOB_SEARCH_SERVER_NAME: job_search_server},

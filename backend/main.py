@@ -11,7 +11,7 @@ import logfire
 import sys
 
 sys.path.append(os.path.dirname(__file__))
-from agent import run_job_finder_agent
+from agent import run_job_finder_agent, ALLOWED_MODELS, DEFAULT_MODEL
 from search_tools import add_known_urls
 from db import (
     init_db,
@@ -75,7 +75,7 @@ app.add_middleware(
 )
 
 # Backend state variables
-agent_status = {"status": "idle", "query": None, "session_id": None}
+agent_status = {"status": "idle", "query": None, "session_id": None, "model": None}
 log_queues = []
 LOG_HISTORY_MAX = 1500
 # Per-client SSE queue bound. A healthy client drains far faster than the agent
@@ -106,6 +106,9 @@ class PullRequest(BaseModel):
     job_types: list[str] = ["fulltime", "remote"]
     # Time period in days: how far back to search (7-90 days)
     time_period_days: int = 7
+    # Orchestrator model (dashboard Model picker). Must be one of agent.ALLOWED_MODELS;
+    # unknown values fall back to DEFAULT_MODEL so older clients keep working.
+    model: str = DEFAULT_MODEL
 
 
 async def publish_log(msg: str):
@@ -155,7 +158,7 @@ def _effective_window_days(user_id: int, query: str, time_period_days: int) -> i
     return min(time_period_days, max(1, math.ceil((hours_since + 12) / 24)))
 
 
-async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, time_period_days: int = 7):
+async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, time_period_days: int = 7, model: str = None):
     """Background task to run the agent and save results to the database."""
     if job_types is None:
         job_types = ["fulltime", "remote"]
@@ -224,6 +227,7 @@ async def run_agent_task(query: str, user_id: int, job_types: list[str] = None, 
             batch_callback=batch_callback,
             job_types=job_types,
             time_period_days=time_period_days,
+            model=model,
         )
 
         if results is None:
@@ -421,15 +425,19 @@ async def pull_jobs(req: PullRequest, background_tasks: BackgroundTasks, user: d
             status_code=400, detail="Agent is already running. Please wait."
         )
 
+    model = req.model if req.model in ALLOWED_MODELS else DEFAULT_MODEL
+
     agent_status["status"] = "running"
     agent_status["query"] = req.query
+    agent_status["model"] = model
     # Start each run with a clean log buffer so the console doesn't replay a stale run.
     log_history.clear()
 
-    background_tasks.add_task(run_agent_task, req.query, user["id"], req.job_types, req.time_period_days)
+    background_tasks.add_task(run_agent_task, req.query, user["id"], req.job_types, req.time_period_days, model)
     return {
         "message": "Job pulling started",
         "query": req.query,
+        "model": model,
         "rate_limit": {
             "remaining": rate_limit_info["remaining"],
             "reset_at": rate_limit_info["reset_at"],
