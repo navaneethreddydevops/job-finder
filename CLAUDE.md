@@ -188,11 +188,11 @@ enforced at every layer, so keep them in sync if you touch one:
    revert this to a drop-by-default filter — that silently hid every job when the backend flag was
    absent (`posted_within_7d=0`, `date_posted=NULL`).
 
-## Search tooling — JobSpy + Exa + Tavily (`backend/search_tools.py`)
+## Search tooling — JobSpy + SerpAPI + Exa + Tavily (`backend/search_tools.py`)
 
-Job discovery is done via the **JobSpy** structured scraper plus the **Exa** and **Tavily**
-search APIs, exposed to the agent as **in-process SDK MCP tools** (`create_sdk_mcp_server` →
-server name `jobsearch`):
+Job discovery is done via the **JobSpy** structured scraper and **SerpAPI** (Google Jobs
+engine) plus the **Exa** and **Tavily** search APIs, exposed to the agent as **in-process
+SDK MCP tools** (`create_sdk_mcp_server` → server name `jobsearch`):
 
 - `mcp__jobsearch__jobspy_search(search_term, time_period_days, results_wanted)` — the
   **primary bulk** discovery tool: one call scrapes Indeed, LinkedIn, Glassdoor, ZipRecruiter,
@@ -202,6 +202,14 @@ server name `jobsearch`):
   `asyncio.to_thread`; on ImportError/scrape failure it returns a clear message and the agent
   falls back to Exa/Tavily for those sources. **Deploy-size note**: jobspy pulls pandas/numpy
   (~100 MB installed) — expected; don't "optimize" it away without replacing the tool.
+- `mcp__jobsearch__serpapi_search(search_term, time_period_days, results_wanted)` — a
+  **supplementary bulk** tool: SerpAPI's structured `google_jobs` engine (US-scoped:
+  `location="United States"`, `gl=us`, remote via `ltype=1`, window via `chips=date_posted:*`,
+  paginated with `next_page_token` — 10 results/page, 1 search credit/page). Remote/full-time/
+  date/US are re-enforced in Python; survivors get `pre_verified=true` + `us_eligible=true`,
+  and `via`-labels map to the 12 allowed sources (unknown boards → `Company`). The
+  orchestrator calls it once per role AFTER `jobspy_search`, and it is the FIRST fallback
+  when jobspy fails. Key from `SERPAPI_API_KEY`; missing key/package returns a clear message.
 - `mcp__jobsearch__exa_search(query, source)` and `mcp__jobsearch__tavily_search(query, source)` —
   cover the non-jobspy sources: each scopes results to the assigned source's domain(s)
   (`myworkdayjobs.com`, `boards.greenhouse.io`/`job-boards.greenhouse.io`, `jobs.lever.co`,
@@ -210,12 +218,12 @@ server name `jobsearch`):
   of candidate postings annotated with `remote`/`full_time`/`posted_within_7d`/`us_eligible`.
   `source='Company'` (career pages) is special: `_domains_for` returns `[]` and the tools search
   the open web with `ALL_SOURCE_DOMAINS` as the exclude list.
-- **Cross-run dedup (keep it)**: all three tools consult a per-run context
+- **Cross-run dedup (keep it)**: all four tools consult a per-run context
   (`set_run_context`/`clear_run_context`/`add_known_urls`) holding the user's stored job URLs and
   drop known results before returning (`skipped_known` in the payload) — this is what makes
   repeat runs cheap. Safe as module state only because `/api/pull` enforces one run at a time.
-- **Keys**: read from env `EXA_API_KEY` / `TAVILY_API_KEY` (never hardcoded; in `.env` locally,
-  FastAPI Cloud Secrets in prod). If a key is missing, the tool returns a clear message and the agent
+- **Keys**: read from env `EXA_API_KEY` / `TAVILY_API_KEY` / `SERPAPI_API_KEY` (never
+  hardcoded; in `.env` locally, FastAPI Cloud Secrets in prod). If a key is missing, the tool returns a clear message and the agent
   falls back to `WebSearch`. JobSpy needs no key.
 - `WebSearch` — fallback web search when a search API key is unavailable.
 - `WebFetch` — opens and reads individual listings to verify dates, that the role is remote + full-time, and extract fields (never for `pre_verified` jobspy results).

@@ -43,6 +43,7 @@ by construction.
 | `Glob`        | Find files by glob pattern |
 | `Grep`        | Search file contents |
 | `mcp__jobsearch__jobspy_search` | **Primary bulk** discovery: structured scrape of Indeed/LinkedIn/Glassdoor/ZipRecruiter/Google Jobs (python-jobspy), pre-verified results |
+| `mcp__jobsearch__serpapi_search` | **Supplementary bulk** discovery via SerpAPI's Google Jobs engine (pre-verified results); also the first fallback when jobspy fails |
 | `mcp__jobsearch__exa_search`    | Job discovery via the Exa search API (non-jobspy sources + fallback) |
 | `mcp__jobsearch__tavily_search` | Job discovery via the Tavily search API (non-jobspy sources + fallback) |
 | `WebSearch`   | Fallback web search when a search-API key is missing |
@@ -55,10 +56,14 @@ toolset as the orchestrator (`exa_search`, `tavily_search`, `Read`, `Write`, `Ed
 `Glob`, `Grep`, `WebSearch`, `WebFetch`, `TodoWrite`).
 
 **Search tooling**: job discovery uses **JobSpy** (open-source `python-jobspy` structured
-scraper — free, no API key) plus the **Exa** and **Tavily** search APIs, all wrapped as
-in-process SDK MCP tools (`backend/search_tools.py`, `create_sdk_mcp_server` → server `jobsearch`)
-and passed via `mcp_servers={"jobsearch": job_search_server}`. Exa/Tavily keys come from env
-`EXA_API_KEY` / `TAVILY_API_KEY`. This is the only MCP integration; the former `job_finder_tools`
+scraper — free, no API key), **SerpAPI** (`serpapi_search`, Google Jobs engine — bulk
+pre-verified supplement to jobspy and its first fallback; `q="<role> remote"`,
+`location="United States"`, `gl=us`, `ltype=1` remote filter, `chips=date_posted:*` window,
+paginated via `next_page_token`, 10 results/page = 1 credit/page), plus the **Exa** and
+**Tavily** search APIs, all wrapped as in-process SDK MCP tools (`backend/search_tools.py`,
+`create_sdk_mcp_server` → server `jobsearch`) and passed via
+`mcp_servers={"jobsearch": job_search_server}`. Keys come from env `EXA_API_KEY` /
+`TAVILY_API_KEY` / `SERPAPI_API_KEY`. This is the only MCP integration; the former `job_finder_tools`
 and `puppeteer` servers remain removed, and the built-in `WebSearch`/`WebFetch` are kept as a fallback.
 
 **Checkpointing & incremental search**: jobs are saved **incrementally per scout batch**
@@ -72,7 +77,7 @@ never repeated:
   the requested `time_period_days` (`_effective_window_days` in `main.py`).
 - **Cross-run URL dedup at zero token cost**: `run_job_finder_agent` loads the user's stored job
   URLs (`db.get_user_job_urls`) and installs them as the search tools' run context
-  (`search_tools.set_run_context` / `clear_run_context`); all three tools drop already-known URLs
+  (`search_tools.set_run_context` / `clear_run_context`); all four tools drop already-known URLs
   before returning (reported as `skipped_known`), and `batch_callback` feeds freshly saved URLs
   back in via `add_known_urls` — the agent never spends tokens re-verifying known jobs. Safe as
   module state because `/api/pull` allows a single run at a time.

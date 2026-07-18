@@ -1,11 +1,18 @@
 """In-process SDK tools that let the orchestrator fetch job listings via **JobSpy**
-(structured scraping), and the **Exa** and **Tavily** search APIs, instead of relying
-solely on Claude's built-in `WebSearch` (which returned too few results).
+(structured scraping), **SerpAPI** (Google Jobs engine), and the **Exa** and **Tavily**
+search APIs, instead of relying solely on Claude's built-in `WebSearch` (which returned
+too few results).
 
 `jobspy_search` is the primary bulk tool: one call scrapes Indeed, LinkedIn, Glassdoor,
 ZipRecruiter, and Google Jobs via the open-source `python-jobspy` library and returns
 fully structured, pre-verified records (remote/full-time/date/US already checked here in
 Python) — the agent never has to read those pages, which is the main token saving.
+
+`serpapi_search` supplements jobspy with SerpAPI's structured Google Jobs engine
+(US-scoped, remote-filtered via `ltype=1`) and doubles as the first fallback when jobspy
+scraping fails. Results are pre-verified the same way jobspy's are (remote/full-time/
+date/US enforced here in Python, `pre_verified=true`), so scouts format them without
+WebFetch. Each page of 10 results costs one SerpAPI search credit.
 
 `exa_search` / `tavily_search` cover the remaining sources: the orchestrator calls them
 with a query and its assigned `source` (Workday, Greenhouse, Lever, Ashby, Dice,
@@ -34,9 +41,9 @@ these deterministically into `remote`, `full_time`, `posted_days_ago`, and
   Tavily's `/extract` endpoint on the returned URLs (only when `TAVILY_API_KEY` is set;
   otherwise those fields are left `null` and the agent should verify manually).
 
-API keys are read from the environment — `EXA_API_KEY` and `TAVILY_API_KEY` — and are
-never hardcoded. If a key is missing the tool returns a clear message so the agent can
-fall back to the built-in `WebSearch`/`WebFetch` tools.
+API keys are read from the environment — `EXA_API_KEY`, `TAVILY_API_KEY`, and
+`SERPAPI_API_KEY` — and are never hardcoded. If a key is missing the tool returns a
+clear message so the agent can fall back to the built-in `WebSearch`/`WebFetch` tools.
 """
 
 import os
@@ -60,6 +67,10 @@ TAVILY_EXTRACT_API_URL = "https://api.tavily.com/extract"
 EXA_NUM_RESULTS = 30
 TAVILY_NUM_RESULTS = 20
 JOBSPY_NUM_RESULTS = 50
+# SerpAPI's google_jobs engine returns 10 jobs per page and each page costs one search
+# credit, so 50 wanted results = up to 5 credits per call.
+SERPAPI_NUM_RESULTS = 50
+SERPAPI_PAGE_SIZE = 10
 # Snippet caps (token budget): exa/tavily raw search snippets vs jobspy's clean
 # markdown descriptions.
 SNIPPET_MAX_CHARS = 300
@@ -748,18 +759,204 @@ async def jobspy_search(args: dict) -> dict:
     return await _jobspy_search_impl(args)
 
 
+# --- SerpAPI Google Jobs -------------------------------------------------------------
+
+# The `via` field ("via LinkedIn", "via Indeed", ...) → our source label. Anything else
+# (Google Jobs aggregates hundreds of boards) maps to "Company", matching how jobspy's
+# google results are labeled.
+_SERPAPI_VIA_TO_SOURCE = {
+    "linkedin": "LinkedIn",
+    "indeed": "Indeed",
+    "glassdoor": "Glassdoor",
+    "ziprecruiter": "ZipRecruiter",
+    "dice": "Dice",
+    "wellfound": "Wellfound",
+    "built in": "Built In",
+}
+
+
+def _serpapi_source_for(via: str | None) -> str:
+    v = (via or "").lower()
+    for needle, label in _SERPAPI_VIA_TO_SOURCE.items():
+        if needle in v:
+            return label
+    return "Company"
+
+
+def _serpapi_chips_for(days: int) -> str:
+    if days <= 1:
+        return "date_posted:today"
+    if days <= 3:
+        return "date_posted:3days"
+    if days <= 7:
+        return "date_posted:week"
+    return "date_posted:month"
+
+
+async def _serpapi_search_impl(args: dict) -> dict:
+    """Testable implementation behind the `serpapi_search` tool."""
+    api_key = os.environ.get("SERPAPI_API_KEY")
+    if not api_key:
+        return _msg(
+            "SERPAPI_API_KEY is not set in the environment — SerpAPI search is "
+            "unavailable. Rely on jobspy_search/exa_search/tavily_search instead."
+        )
+    try:
+        import serpapi
+    except ImportError:
+        return _msg(
+            "The serpapi package is not installed — SerpAPI search is unavailable. "
+            "Rely on jobspy_search/exa_search/tavily_search instead."
+        )
+
+    search_term = (args.get("search_term") or "").strip()
+    if not search_term:
+        return _msg("serpapi_search requires a non-empty 'search_term'.")
+
+    time_period_days = args.get("time_period_days", DEFAULT_RECENCY_DAYS)
+    results_wanted = args.get("results_wanted", SERPAPI_NUM_RESULTS)
+    now = datetime.now(timezone.utc)
+
+    client = serpapi.Client(api_key=api_key)
+    params = {
+        "engine": "google_jobs",
+        "q": f"{search_term} remote",
+        "location": "United States",
+        "google_domain": "google.com",
+        "gl": "us",
+        "hl": "en",
+        # ltype=1 = Google Jobs' "Work from home" filter; chips narrows the posting
+        # window (best-effort — Google drops it sometimes, so dates are also re-checked
+        # in Python below).
+        "ltype": "1",
+        "chips": _serpapi_chips_for(int(time_period_days)),
+    }
+
+    raw_jobs: list[dict] = []
+    error_note = None
+    next_page_token = None
+    max_pages = max(1, -(-int(results_wanted) // SERPAPI_PAGE_SIZE))  # ceil division
+    for _ in range(max_pages):
+        page_params = dict(params)
+        if next_page_token:
+            page_params["next_page_token"] = next_page_token
+        try:
+            data = await asyncio.to_thread(client.search, page_params)
+        except Exception as e:
+            # Keep whatever earlier pages returned; surface the error alongside them.
+            error_note = f"SerpAPI page fetch error: {e}"
+            break
+        page_jobs = data.get("jobs_results") or []
+        raw_jobs.extend(page_jobs)
+        next_page_token = (data.get("serpapi_pagination") or {}).get("next_page_token")
+        if not next_page_token or len(page_jobs) < SERPAPI_PAGE_SIZE:
+            break
+        if len(raw_jobs) >= results_wanted:
+            break
+
+    if not raw_jobs and error_note:
+        return _msg(f"{error_note}. Rely on jobspy_search/exa_search/tavily_search instead.")
+
+    results = []
+    for job in raw_jobs[: int(results_wanted)]:
+        ext = job.get("detected_extensions") or {}
+        apply_options = job.get("apply_options") or []
+        url = None
+        if apply_options and apply_options[0].get("link"):
+            url = apply_options[0]["link"]
+        if not _is_valid_job_url(url):
+            url = job.get("share_link")
+        if not _is_valid_job_url(url):
+            continue
+
+        # Hard filters, applied here so the agent never spends tokens on rejects
+        # (keep-by-default when a field is absent — scouts judge borderline cases).
+        schedule = (ext.get("schedule_type") or "").lower()
+        if schedule and "full" not in schedule:
+            continue
+        haystack = " ".join(
+            str(p) for p in (job.get("title"), job.get("location"), (job.get("description") or "")[:2000]) if p
+        )
+        wfh = ext.get("work_from_home")
+        if not wfh and not re.search(r"\b(remote|work from home|anywhere)\b", haystack, re.IGNORECASE):
+            continue
+        if _classify_us_eligible(haystack) is False:
+            continue
+
+        posted_text = ext.get("posted_at")
+        posted_days_ago = _parse_relative_days(posted_text) if posted_text else None
+        if posted_days_ago is not None and posted_days_ago > time_period_days:
+            continue
+        results.append(
+            {
+                "title": job.get("title"),
+                "company": job.get("company_name"),
+                "url": url,
+                "location": job.get("location") or "Remote",
+                "snippet": (job.get("description") or "")[:JOBSPY_SNIPPET_MAX_CHARS],
+                "date_posted": (
+                    (now - timedelta(days=posted_days_ago)).date().isoformat()
+                    if posted_days_ago is not None
+                    else posted_text
+                ),
+                "posted_days_ago": posted_days_ago,
+                # chips already filtered server-side; unknown dates are kept.
+                "posted_within_7d": (
+                    posted_days_ago <= time_period_days if posted_days_ago is not None else True
+                ),
+                "date_confidence": "parsed" if posted_days_ago is not None else "search_filtered",
+                "remote": True,
+                "full_time": True if "full" in schedule else None,
+                "salary": ext.get("salary"),
+                "source": _serpapi_source_for(job.get("via")),
+                # Structured Google Jobs result, US-scoped (location=United States,
+                # gl=us, ltype=1): scouts must format these WITHOUT WebFetch.
+                "pre_verified": True,
+                "us_eligible": True,
+            }
+        )
+
+    results, skipped_known = _filter_known(results)
+    payload = {
+        "provider": "serpapi",
+        "engine": "google_jobs",
+        "count": len(results),
+        "skipped_known": skipped_known,
+        "results": results,
+    }
+    if error_note:
+        payload["note"] = error_note
+    return _ok(payload)
+
+
+@tool(
+    "serpapi_search",
+    "Bulk-fetch structured job postings from Google Jobs via SerpAPI in ONE call (remote, "
+    "full-time, US-scoped, within the time window — all enforced server-side). Every "
+    "result has pre_verified=true: its remote/full_time/date/US fields are already "
+    "verified, so NEVER WebFetch these — pass them straight to a job_scout to format. "
+    "Jobs the user already has are filtered out automatically (`skipped_known`). Call "
+    "this once per role AFTER jobspy_search for extra Google Jobs coverage, and use it as "
+    "the FIRST fallback if jobspy_search fails or returns an error.",
+    {"search_term": str, "time_period_days": int, "results_wanted": int},
+)
+async def serpapi_search(args: dict) -> dict:
+    return await _serpapi_search_impl(args)
+
+
 # In-process MCP server exposing the search tools. The SDK names the tools
-# `mcp__jobsearch__jobspy_search`, `mcp__jobsearch__exa_search`, and
-# `mcp__jobsearch__tavily_search`.
+# `mcp__jobsearch__jobspy_search`, `mcp__jobsearch__serpapi_search`,
+# `mcp__jobsearch__exa_search`, and `mcp__jobsearch__tavily_search`.
 JOB_SEARCH_SERVER_NAME = "jobsearch"
 job_search_server = create_sdk_mcp_server(
     name=JOB_SEARCH_SERVER_NAME,
     version="1.0.0",
-    tools=[jobspy_search, exa_search, tavily_search],
+    tools=[jobspy_search, serpapi_search, exa_search, tavily_search],
 )
 
 # Fully-qualified tool names to grant via allowed_tools / AgentDefinition.tools.
 EXA_TOOL = f"mcp__{JOB_SEARCH_SERVER_NAME}__exa_search"
 TAVILY_TOOL = f"mcp__{JOB_SEARCH_SERVER_NAME}__tavily_search"
 JOBSPY_TOOL = f"mcp__{JOB_SEARCH_SERVER_NAME}__jobspy_search"
-SEARCH_TOOL_NAMES = [JOBSPY_TOOL, EXA_TOOL, TAVILY_TOOL]
+SERPAPI_TOOL = f"mcp__{JOB_SEARCH_SERVER_NAME}__serpapi_search"
+SEARCH_TOOL_NAMES = [JOBSPY_TOOL, SERPAPI_TOOL, EXA_TOOL, TAVILY_TOOL]
