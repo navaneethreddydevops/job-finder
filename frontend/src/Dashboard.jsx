@@ -423,7 +423,8 @@ function Dashboard() {
     const check = async () => {
       try {
         const resp = await fetch(apiUrl('/api/health'));
-        setHealthStatus(resp.ok ? 'ok' : 'error');
+        const data = await resp.json().catch(() => null);
+        setHealthStatus(resp.ok && data?.status === 'operational' ? 'ok' : 'error');
       } catch { setHealthStatus('error'); }
     };
     check();
@@ -711,14 +712,6 @@ function Dashboard() {
         )}
 
         <div className="header-actions">
-          {/* Backend status */}
-          <div className="header-status-corner">
-            <div className={`health-pill ${healthStatus}`} title={`Backend ${healthStatus === 'ok' ? 'online' : healthStatus === 'error' ? 'offline' : 'checking'}`}>
-              <div className="health-dot" />
-              <span>{healthStatus === 'ok' ? 'Online' : healthStatus === 'error' ? 'Offline' : '…'}</span>
-            </div>
-          </div>
-
           {/* Primary navigation */}
           <Link to="/resume/optimizer" className="btn nav-link" title="Resume Optimizer">
             <FileText size={16} />
@@ -1492,6 +1485,22 @@ function Dashboard() {
           </>
         )}
       </dialog>
+
+      <footer className="app-footer" id="app-footer">
+        <span className={`status-indicator ${healthStatus}`} id="footer-status-indicator">
+          <span className="status-dot-wrap" aria-hidden="true">
+            <span className="status-dot-ping" />
+            <span className="status-dot" />
+          </span>
+          <span className="status-label">
+            {healthStatus === 'ok'
+              ? 'All systems operational'
+              : healthStatus === 'error'
+                ? 'Systems experiencing issues'
+                : 'Checking systems…'}
+          </span>
+        </span>
+      </footer>
     </div>
   );
 }
