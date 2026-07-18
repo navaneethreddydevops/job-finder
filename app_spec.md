@@ -645,6 +645,40 @@ auto-deploys; no deploy secrets in the repo). ☑ done.
 
 ---
 
+## Task 8 — Orchestrator model selection (dashboard → agent)
+
+The user picks which Claude model runs the job-finder **orchestrator** from the dashboard.
+Scope decision (2026-07): the selection applies ONLY to the orchestrator — the `job_scout`
+subagent stays pinned to `claude-haiku-4-5` and the resume optimizer stays on
+`claude-sonnet-5`.
+
+### Data / API
+- Allowlist lives in `backend/agent.py`: `ALLOWED_MODELS = ["claude-fable-5",
+  "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"]`, `DEFAULT_MODEL =
+  "claude-sonnet-5"`. `run_job_finder_agent`/`_run_job_finder_agent` take `model=None`;
+  unknown values fall back to `DEFAULT_MODEL`. The Logfire run span records the model.
+- `POST /api/pull` body gains `model: str = DEFAULT_MODEL` (`PullRequest` in `main.py`).
+  The endpoint validates against the allowlist (fallback, not 400 — old clients keep
+  working), stores the resolved model in `agent_status["model"]` (surfaced by
+  `GET /api/status`), echoes it in the response, and forwards it through
+  `run_agent_task` → `run_job_finder_agent`.
+
+### UI (Dashboard.jsx)
+- `CLAUDE_MODELS` constant (id / label / hint) mirrors `ALLOWED_MODELS` — keep in sync.
+- A "Model" `search-option-group` (`id="model-select-group"`) in the Run Agent form,
+  below Posted Within: a 2×2 grid of pill buttons (`.model-preset`, extends
+  `.time-preset`) showing the model label + a small hint ("Most capable", "Powerful",
+  "Balanced", "Fastest"); disabled while a run is active.
+- Selection persists in localStorage `jf_model` (lazy-init guarded against stale ids)
+  and is sent in both `/api/pull` call sites (the form submit and the WebMCP
+  `trigger_agent_run` tool, which reads `stateRef.current.model` to avoid a stale
+  closure).
+
+### Status: ☑ implemented & verified (TestClient forward/fallback checks + browser
+check of render, persistence across refresh, and request body).
+
+---
+
 # Future Enhancements & Roadmap
 
 This section outlines proposed features and improvements organized by priority and complexity. These enhancements build on the existing foundation and can be implemented incrementally.
