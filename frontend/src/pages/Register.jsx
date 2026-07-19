@@ -20,7 +20,8 @@ export default function Register() {
     setBusy(true);
     try {
       await register({ email: form.email, password: form.password, full_name: form.full_name, phone: form.phone });
-      navigate('/', { replace: true });
+      // New accounts go through the (skippable) application-profile wizard first.
+      navigate('/onboarding', { replace: true });
     } catch (err) {
       setError(err.message);
     } finally {

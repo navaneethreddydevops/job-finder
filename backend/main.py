@@ -20,12 +20,14 @@ from db import (
     get_user_jobs,
     toggle_applied,
     delete_user_jobs,
-    get_application_stats,
     get_pull_checkpoint,
     upsert_pull_checkpoint,
 )
 from auth import init_auth_db, router as auth_router, get_current_user
 from resume import init_resume_db, router as resume_router
+from applications import router as applications_router
+from profile_api import router as profile_router
+from apply_agent import router as apply_agent_router, apply_agent_available, recover_stale_apply_runs
 from rate_limit import enforce_rate_limit, RateLimitConfig
 
 # Initialize database schema
@@ -62,9 +64,16 @@ logfire.instrument_system_metrics()
 # does NOT capture — only in-process `anthropic.Anthropic()` usage.
 logfire.instrument_anthropic()
 
-# Core routers (job search, auth, resume)
+# Core routers (job search, auth, resume, applications, profile, apply agent)
 app.include_router(auth_router)
 app.include_router(resume_router)
+app.include_router(applications_router)
+app.include_router(profile_router)
+app.include_router(apply_agent_router)
+
+# Apply runs are in-memory background tasks: anything left mid-flight by a previous
+# process is unfinishable — mark those rows failed so the UI doesn't spin forever.
+recover_stale_apply_runs()
 
 # CORS middleware for local development
 app.add_middleware(
@@ -360,17 +369,7 @@ async def health_check(response: Response):
 @app.get("/api/status")
 async def get_status():
     """Returns the current running status of the job finder agent."""
-    return agent_status
-
-
-@app.get("/api/applications/stats")
-async def get_application_stats_endpoint(user: dict = Depends(get_current_user)):
-    """Returns application statistics for the current user."""
-    try:
-        stats = get_application_stats(user["id"])
-        return stats
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error reading stats: {e}")
+    return {**agent_status, "apply_agent_available": apply_agent_available()}
 
 
 @app.get("/api/jobs/export")

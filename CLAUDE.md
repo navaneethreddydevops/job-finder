@@ -122,7 +122,10 @@ env drop in any new backend entrypoint/script (see `backend/diag.py`).
     in-process SDK MCP server (`backend/search_tools.py`)
   - **Web operations**: `WebSearch`, `WebFetch` — fallback search + reading individual listings
   - **Agent control**: `Task` (orchestrator only), `TodoWrite` — for orchestration and planning
-  - The only MCP integration is the in-process `jobsearch` server (JobSpy + Exa + Tavily). No external MCP servers.
+  - The job-finder agent's only MCP integration is the in-process `jobsearch` server (JobSpy + Exa + Tavily).
+    The single external MCP server in the repo is **Playwright MCP**, scoped exclusively to the apply agent
+    (`backend/apply_agent.py`, Task 10) — do not add it (or any other external server) to the job-finder
+    orchestrator.
 - **Orchestrator model is user-selectable** from the dashboard's Model picker
   (`#model-select-group` in `Dashboard.jsx`, persisted in localStorage `jf_model`): one of
   `ALLOWED_MODELS` in `agent.py` — `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`,
@@ -364,6 +367,61 @@ Endpoints: `POST /api/resume/optimize` (multipart: `job_description` + `original
 `resume` file; background task), `GET /api/resume/status` (progress bar),
 `GET /api/resume/result` (`{content, original_text, ...}`), `PUT /api/resume/content`
 (save edits + rebuild), `GET /api/resume/download`. See `app_spec.md` for full details.
+
+## User profile & onboarding (`backend/profile_api.py` — Task 9)
+
+One-to-one `user_profiles` table (db.py) holds everything a careers-page application form
+asks for: contact + address, links, **work authorization** (nullable tri-state booleans —
+NULL means unanswered, which blocks auto-apply), preferences, experience, optional **EEO
+answers** (default `'Decline to self-identify'`), and the **canonical resume** (blob +
+extracted text; `.docx` via python-docx, `.pdf` via **pypdf**; 5 MB cap). The module is
+named `profile_api` (NOT `profile`) because backend/ is on sys.path and `profile.py` would
+shadow the stdlib module. Endpoints: `GET/PUT /api/profile/full` (partial upsert,
+whitelisted via the pydantic model with `extra="forbid"`), `POST/GET/DELETE
+/api/profile/resume`. `db.is_profile_apply_ready(profile)` is the **single source of
+truth** for the Auto-Apply gate (name/email/phone/city/state, both work-auth answers,
+years_experience, resume); `GET /api/me` surfaces `profile_completed` + `apply_ready`.
+Frontend: `/onboarding` wizard (lazy route; Register redirects there; skippable at every
+step, resumes from `onboarding_step`) and Profile page tabs share the section components
+in `frontend/src/components/profile/ProfileForms.jsx` — extend those, not page-local
+forms. The resume optimizer's `resume_jobs` copy stays separate (no auto-sync).
+
+## Autonomous apply agent (`backend/apply_agent.py` — Task 10)
+
+The dashboard's **Auto-Apply** button starts a background Claude agent that opens the job
+URL in a **headless browser via Playwright MCP** (external stdio server: `npx -y
+@playwright/mcp@latest --headless --isolated --output-dir <tmpdir>`), fills the employer's
+form from the stored profile, uploads the resume (the file is written INSIDE the
+`--output-dir` because Playwright MCP only allows `file_upload` from its roots), answers
+screening questions, submits, and returns a structured `ApplyResult`
+(`submitted|needs_review|failed`). Hard prompt rules: never fabricate; never guess legally
+significant answers (work auth, visa, EEO, clearance…) — stop with `needs_review` +
+screenshot on login walls, CAPTCHAs, or payment requests. The final message
+must be ONLY the ApplyResult JSON (belt-and-braces with `output_format` — keep both).
+**Human-in-the-loop**: email-verification codes and unanswerable required questions do
+NOT stop the run — the agent calls the in-process `userinput` SDK MCP tool
+`await_user_input(application_id, reason)`, which parks the row in
+`apply_status='awaiting_input'` (+ `apply_input_prompt`) and blocks ~55 s per call on a
+future in the `_live_runs` registry while the browser session stays alive; `POST
+/api/jobs/{id}/apply-agent/input` resolves it and the run resumes. Expires after ~8 min
+→ `needs_review`. NEVER extend this tool to passwords/logins/CAPTCHAs. **Live view**:
+the agent takes `progress-NN-*.png` milestone screenshots; `GET
+/api/jobs/{id}/apply-agent/live-screenshot` streams the newest one from the live run's
+tempdir and the dashboard shows it (refreshed off the 1.5 s status poll) with the log
+collapsed underneath.
+State lives on the `applications` row (`apply_method/apply_status/apply_error/
+apply_screenshot/apply_log/apply_started_at/apply_finished_at`); `submitted` also sets the
+job's `applied` flag and advances the lifecycle to `applied`. **Separate lane** from the
+search agent: it must NOT touch `agent_status`, the SSE log stream, or the search tools'
+run context — the frontend polls `GET /api/jobs/{id}/apply-agent/status` at 1.5 s. One
+apply per user at a time (`_active_users` + lock); rows stuck `queued|running` are failed
+on boot (`recover_stale_apply_runs`). Rate limit `RateLimitConfig.APPLY_AGENT` (10/hr).
+**Capability-gated**: needs Node/`npx` (+ Chromium) — absent on FastAPI Cloud, so
+`apply_agent_available()` (override `APPLY_AGENT_ENABLED=0|1`) drives a 503 and
+`/api/status.apply_agent_available` hides the button. Dev smoke: `APPLY_AGENT_MOCK=1`
+serves `GET /api/dev/mock-application` (`?mode=captcha|login|weird_question`); run
+`uv run python backend/diag_apply.py [mode]` against it (real Claude run — manual only).
+The `applications.py` router is now wired into main.py (bare imports, not `backend.*`).
 
 ## Development workflow — follow this for ALL future work
 

@@ -38,6 +38,9 @@ class RateLimitConfig:
     PULL_AGENT = 1  # Max 1 agent run per 30 minutes
     PULL_AGENT_WINDOW = 1800  # 30 minutes
 
+    APPLY_AGENT = 10  # Max 10 autonomous apply runs per hour
+    APPLY_AGENT_WINDOW = 3600  # 1 hour
+
     DEFAULT_LIMIT = 100  # 100 requests per hour
     DEFAULT_WINDOW = 3600  # 1 hour
 

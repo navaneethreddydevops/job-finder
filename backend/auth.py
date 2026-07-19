@@ -273,6 +273,14 @@ async def logout(user: dict = Depends(get_current_user)):
 @router.get("/me")
 async def me(user: dict = Depends(get_current_user)):
     user.pop("_token", None)
+    # Task 9: surface onboarding/apply-gate state on the user object so the frontend
+    # can gate the Auto-Apply button without an extra profile request.
+    from db import get_user_profile, is_profile_apply_ready
+
+    profile = get_user_profile(user["id"])
+    ready, _missing = is_profile_apply_ready(profile)
+    user["profile_completed"] = bool(profile.get("onboarding_completed"))
+    user["apply_ready"] = ready
     return {"user": user}
 
 

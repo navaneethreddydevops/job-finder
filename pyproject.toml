@@ -16,6 +16,7 @@ dependencies = [
     "fastapi[standard]>=0.116.0,<0.137",
     "logfire[fastapi,system-metrics]>=4.37.0",
     "psycopg[binary]>=3.2.0",
+    "pypdf>=4.0.0",
     "python-docx>=1.1.2",
     "python-dotenv>=1.2.2",
     "python-jobspy>=1.1.82",

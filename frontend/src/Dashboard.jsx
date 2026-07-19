@@ -25,6 +25,8 @@ import {
   LayoutGrid,
   List,
 } from 'lucide-react';
+import { Bot } from 'lucide-react';
+import { Link as RouterLink } from 'react-router-dom';
 import UserMenu from './components/UserMenu.jsx';
 import { useToast } from './components/Toast.jsx';
 import ApplicationStatus from './components/ApplicationStatus.jsx';
@@ -139,6 +141,21 @@ function Dashboard() {
   );
   const [showBookmarksOnly, setShowBookmarksOnly] = useState(false);
   const [bookmarkCount, setBookmarkCount] = useState(0);
+
+  // ── Autonomous apply agent (Task 10) ────────────────────────────────────────
+  // Per-job apply state: { status, error, applicationId, lines }. Hydrated from
+  // /api/applications on mount, then driven by 1.5 s polling while a run is live.
+  const [applyStates, setApplyStates] = useState({});
+  // Missing-profile-fields list when the backend rejects an auto-apply (gating modal).
+  const [gatingFields, setGatingFields] = useState(null);
+  // Object URL of the needs_review/confirmation screenshot for the open details dialog.
+  const [applyShotUrl, setApplyShotUrl] = useState(null);
+  // Live milestone screenshot of an in-flight run (refreshed off the status poll).
+  const [liveShotUrl, setLiveShotUrl] = useState(null);
+  // Controlled value for the human-in-the-loop input box (verification codes etc).
+  const [applyInputValue, setApplyInputValue] = useState('');
+  const applyPollersRef = useRef({});
+  const applyPrevStatusRef = useRef({});
 
   const JOBS_PER_PAGE = 12;
 
@@ -271,6 +288,128 @@ function Dashboard() {
     }
   };
 
+  // ── apply agent helpers ─────────────────────────────────────────────────────
+  const APPLY_ACTIVE = new Set(['queued', 'running', 'awaiting_input']);
+
+  const setApplyState = (jobId, patch) => {
+    setApplyStates(prev => ({ ...prev, [jobId]: { ...prev[jobId], ...patch } }));
+  };
+
+  const stopApplyPolling = (jobId) => {
+    if (applyPollersRef.current[jobId]) {
+      clearInterval(applyPollersRef.current[jobId]);
+      delete applyPollersRef.current[jobId];
+    }
+  };
+
+  const startApplyPolling = (jobId) => {
+    stopApplyPolling(jobId);
+    applyPollersRef.current[jobId] = setInterval(async () => {
+      try {
+        const resp = await apiFetch(`/api/jobs/${jobId}/apply-agent/status`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        setApplyState(jobId, {
+          status: data.apply_status,
+          error: data.apply_error,
+          inputPrompt: data.apply_input_prompt || '',
+          applicationId: data.application_id,
+          lines: data.progress_lines || [],
+          hasLiveShot: !!data.has_live_screenshot,
+        });
+        if (data.apply_status === 'awaiting_input' && applyPrevStatusRef.current[jobId] !== 'awaiting_input') {
+          addToast('The apply agent needs your input — open the job to respond', 'error');
+        }
+        applyPrevStatusRef.current[jobId] = data.apply_status;
+        if (data.apply_status && !APPLY_ACTIVE.has(data.apply_status)) {
+          stopApplyPolling(jobId);
+          fetchJobs();
+          fetchAppStats();
+          if (data.apply_status === 'submitted') {
+            addToast('Application submitted by the agent 🎉', 'success');
+          } else if (data.apply_status === 'needs_review') {
+            addToast(`Apply agent needs your review: ${data.apply_error}`, 'error');
+          } else {
+            addToast(`Apply agent failed: ${data.apply_error}`, 'error');
+          }
+        }
+      } catch (err) { console.error('Apply status poll failed:', err); }
+    }, 1500);
+  };
+
+  const handleAutoApply = async (jobId) => {
+    try {
+      const resp = await apiFetch(`/api/jobs/${jobId}/apply-agent`, { method: 'POST' });
+      const data = await resp.json();
+      if (resp.ok) {
+        setApplyState(jobId, { status: 'queued', error: '', applicationId: data.application_id, lines: [] });
+        addToast('Apply agent started — filling out the application…', 'success');
+        startApplyPolling(jobId);
+      } else if (resp.status === 409 && data.detail?.missing_fields) {
+        setGatingFields(data.detail.missing_fields);
+      } else {
+        const msg = data.detail?.message || data.detail || 'Failed to start the apply agent.';
+        addToast(typeof msg === 'string' ? msg : 'Failed to start the apply agent.', 'error');
+      }
+    } catch (err) {
+      addToast('Network error starting the apply agent', 'error');
+      console.error('Auto-apply failed:', err);
+    }
+  };
+
+  // Hydrate per-job apply chips from stored application rows, and resume polling
+  // for any run that was live before a refresh.
+  const hydrateApplyStates = async () => {
+    try {
+      const resp = await apiFetch('/api/applications');
+      if (!resp.ok) return;
+      const apps = await resp.json();
+      const next = {};
+      for (const app of apps) {
+        if (app.apply_status) {
+          next[app.job_id] = {
+            status: app.apply_status,
+            error: app.apply_error || '',
+            applicationId: app.id,
+            lines: [],
+          };
+          if (APPLY_ACTIVE.has(app.apply_status)) startApplyPolling(app.job_id);
+        }
+      }
+      setApplyStates(next);
+    } catch (err) { console.error('Failed to hydrate apply states:', err); }
+  };
+
+  const APPLY_CHIP = {
+    queued: { label: 'Agent queued…', cls: 'apply-chip-active' },
+    running: { label: 'Agent applying…', cls: 'apply-chip-active' },
+    awaiting_input: { label: 'Needs your input', cls: 'apply-chip-warn' },
+    submitted: { label: 'Auto-applied', cls: 'apply-chip-success' },
+    needs_review: { label: 'Needs review', cls: 'apply-chip-warn' },
+    failed: { label: 'Apply failed', cls: 'apply-chip-error' },
+  };
+
+  const submitApplyInput = async (jobId) => {
+    const value = applyInputValue.trim();
+    if (!value) return;
+    try {
+      const resp = await apiFetch(`/api/jobs/${jobId}/apply-agent/input`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value }),
+      });
+      if (resp.ok) {
+        setApplyInputValue('');
+        addToast('Sent — the agent is resuming', 'success');
+      } else {
+        const data = await resp.json();
+        addToast(data.detail || 'The agent is not waiting for input right now', 'error');
+      }
+    } catch {
+      addToast('Network error sending input', 'error');
+    }
+  };
+
   const fetchStatus = async () => {
     try {
       const resp = await fetch(apiUrl('/api/status'));
@@ -398,6 +537,7 @@ function Dashboard() {
     fetchJobs();
     fetchAppStats();
     fetchBookmarkCount();
+    hydrateApplyStates();
 
     // Check if an agent is already running (e.g. from a page refresh)
     const checkAgentStatus = async () => {
@@ -431,8 +571,57 @@ function Dashboard() {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
+      Object.values(applyPollersRef.current).forEach(clearInterval);
+      applyPollersRef.current = {};
     };
   }, []);
+
+  // Load the apply screenshot for the open details dialog (auth-protected, so it's
+  // fetched via apiFetch into an object URL rather than a plain <img src>).
+  useEffect(() => {
+    let revoked = false;
+    let url = null;
+    setApplyShotUrl(null);
+    const state = selectedJob ? applyStates[selectedJob.id] : null;
+    if (state?.applicationId && ['needs_review', 'submitted', 'failed'].includes(state.status)) {
+      (async () => {
+        try {
+          const resp = await apiFetch(`/api/applications/${state.applicationId}/screenshot`);
+          if (!resp.ok) return;
+          const blob = await resp.blob();
+          if (revoked) return;
+          url = URL.createObjectURL(blob);
+          setApplyShotUrl(url);
+        } catch { /* no screenshot — panel simply omits it */ }
+      })();
+    }
+    return () => { revoked = true; if (url) URL.revokeObjectURL(url); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedJob, applyStates[selectedJob?.id]?.status]);
+
+  // Live milestone screenshot while the open job's run is in flight: refresh every
+  // 3 s (auth-protected, so fetched via apiFetch into an object URL).
+  useEffect(() => {
+    const jobId = selectedJob?.id;
+    const state = jobId ? applyStates[jobId] : null;
+    const live = state && APPLY_ACTIVE.has(state.status);
+    if (!live) { setLiveShotUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return null; }); return; }
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const resp = await apiFetch(`/api/jobs/${jobId}/apply-agent/live-screenshot`);
+        if (!resp.ok || stopped) return;
+        const blob = await resp.blob();
+        if (stopped) return;
+        const url = URL.createObjectURL(blob);
+        setLiveShotUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
+      } catch { /* no screenshot yet */ }
+    };
+    tick();
+    const interval = setInterval(tick, 3000);
+    return () => { stopped = true; clearInterval(interval); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedJob?.id, applyStates[selectedJob?.id]?.status]);
 
   // health check
   useEffect(() => {
@@ -671,6 +860,27 @@ function Dashboard() {
                 return { success: true, message: `Set applied=${input.applied} for job ${input.jobId}` };
               }
               return { success: false, error: 'Failed to update on backend' };
+            } catch (err) { return { success: false, error: err.message }; }
+          },
+        }, { signal });
+
+        modelContext.registerTool({
+          name: 'apply_to_job',
+          description: 'Start the autonomous apply agent for a job: it opens the posting in a headless browser, fills the application form from the stored user profile, uploads the resume, and submits. Requires a complete profile.',
+          inputSchema: { type: 'object', properties: { jobId: { type: 'integer' } }, required: ['jobId'] },
+          async execute(input) {
+            try {
+              const resp = await apiFetch(`/api/jobs/${input.jobId}/apply-agent`, { method: 'POST' });
+              const data = await resp.json();
+              if (resp.ok) {
+                setApplyState(input.jobId, { status: 'queued', error: '', applicationId: data.application_id, lines: [] });
+                startApplyPolling(input.jobId);
+                return { success: true, message: `Apply agent started for job ${input.jobId} (application ${data.application_id}). Poll the job's chip for progress.` };
+              }
+              if (resp.status === 409 && data.detail?.missing_fields) {
+                return { success: false, error: `Profile incomplete — missing: ${data.detail.missing_fields.join(', ')}` };
+              }
+              return { success: false, error: data.detail?.message || data.detail || 'Failed to start the apply agent' };
             } catch (err) { return { success: false, error: err.message }; }
           },
         }, { signal });
@@ -1346,12 +1556,26 @@ function Dashboard() {
                         <span className="job-meta-item"><Calendar size={12} />{job.date_posted || 'Recently posted'}</span>
                       </div>
 
-                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
                         <span className="badge badge-source">{job.source}</span>
                         {job.applied && (
                           <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(42,126,79,0.2)', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
                             <CheckCircle2 size={10} /> Applied
                           </span>
+                        )}
+                        {applyStates[job.id]?.status && APPLY_CHIP[applyStates[job.id].status] && (
+                          <span className={`badge apply-chip ${APPLY_CHIP[applyStates[job.id].status].cls}`} title={applyStates[job.id].error || undefined}>
+                            <Bot size={10} /> {APPLY_CHIP[applyStates[job.id].status].label}
+                          </span>
+                        )}
+                        {status.apply_agent_available && !job.applied && !APPLY_ACTIVE.has(applyStates[job.id]?.status) && applyStates[job.id]?.status !== 'submitted' && (
+                          <button
+                            className="btn btn-sm apply-agent-btn"
+                            onClick={(e) => { e.stopPropagation(); handleAutoApply(job.id); }}
+                            title="Have the agent fill out and submit this application using your profile"
+                          >
+                            <Bot size={12} /> Auto-Apply
+                          </button>
                         )}
                       </div>
 
@@ -1480,12 +1704,22 @@ function Dashboard() {
                       )}
                     </div>
                     <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+                      {status.apply_agent_available && !selectedJob.applied && !APPLY_ACTIVE.has(applyStates[selectedJob.id]?.status) && applyStates[selectedJob.id]?.status !== 'submitted' && (
+                        <button
+                          id="auto-apply-btn"
+                          className="btn btn-primary"
+                          onClick={() => handleAutoApply(selectedJob.id)}
+                          title="The agent opens this posting in a headless browser, fills the form from your profile, uploads your resume, and submits"
+                        >
+                          <Bot size={16} />Auto-Apply with Agent
+                        </button>
+                      )}
                       {selectedJob.url?.startsWith('http') && (
                         <a
                           href={selectedJob.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="btn btn-primary"
+                          className="btn"
                           onClick={() => { if (!selectedJob.applied) handleToggleApplied(selectedJob.id, selectedJob.applied); }}
                           style={{ textDecoration: 'none' }}
                         >
@@ -1501,6 +1735,80 @@ function Dashboard() {
                       </button>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* ── Apply-agent run panel ─────────────────────────────────── */}
+              {applyStates[selectedJob.id]?.status && (
+                <div className="modal-section" id="modal-section-apply-agent">
+                  <span className="modal-section-title">Apply Agent</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    {APPLY_CHIP[applyStates[selectedJob.id].status] && (
+                      <span className={`badge apply-chip ${APPLY_CHIP[applyStates[selectedJob.id].status].cls}`}>
+                        <Bot size={11} /> {APPLY_CHIP[applyStates[selectedJob.id].status].label}
+                      </span>
+                    )}
+                    {applyStates[selectedJob.id].error && (
+                      <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                        {applyStates[selectedJob.id].error}
+                      </span>
+                    )}
+                  </div>
+                  {/* Human-in-the-loop: the paused agent is asking for something */}
+                  {applyStates[selectedJob.id].status === 'awaiting_input' && (
+                    <div className="apply-input-panel" id="apply-input-panel">
+                      <span className="apply-input-prompt">
+                        {applyStates[selectedJob.id].inputPrompt || 'The agent needs your input to continue.'}
+                      </span>
+                      <div className="apply-input-row">
+                        <input
+                          id="apply-input-field"
+                          className="input-text"
+                          value={applyInputValue}
+                          onChange={(e) => setApplyInputValue(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') submitApplyInput(selectedJob.id); }}
+                          placeholder="Paste the code / answer here"
+                          autoFocus
+                        />
+                        <button className="btn btn-primary" onClick={() => submitApplyInput(selectedJob.id)}>
+                          Send to agent
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {/* Live view while the agent works; stored screenshot afterwards */}
+                  {(liveShotUrl && APPLY_ACTIVE.has(applyStates[selectedJob.id].status)) ? (
+                    <div style={{ marginTop: '0.6rem' }}>
+                      <span className="control-label">Live view — what the agent sees</span>
+                      <img src={liveShotUrl} alt="Live view of the application the agent is filling" className="apply-screenshot apply-screenshot-live" />
+                      {(applyStates[selectedJob.id].lines || []).length > 0 && (
+                        <div className="apply-live-caption">
+                          {applyStates[selectedJob.id].lines.filter(l => !l.startsWith('[browser]') && !l.startsWith('[tool]')).slice(-1)[0]
+                            || applyStates[selectedJob.id].lines.slice(-1)[0]}
+                        </div>
+                      )}
+                    </div>
+                  ) : applyShotUrl && (
+                    <div style={{ marginTop: '0.6rem' }}>
+                      <span className="control-label">Final page screenshot</span>
+                      <img src={applyShotUrl} alt="Apply agent final page state" className="apply-screenshot" />
+                    </div>
+                  )}
+                  {(applyStates[selectedJob.id].lines || []).length > 0 && (
+                    <details className="apply-log-details">
+                      <summary>Activity log</summary>
+                      <div className="apply-progress-lines">
+                        {applyStates[selectedJob.id].lines.map((line, i) => (
+                          <span key={i} className="console-log-text log-system">{line}</span>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                  {applyStates[selectedJob.id].status === 'needs_review' && selectedJob.url?.startsWith('http') && (
+                    <a href={selectedJob.url} target="_blank" rel="noopener noreferrer" className="btn btn-sm" style={{ marginTop: '0.6rem', textDecoration: 'none' }}>
+                      <LinkIcon size={13} /> Finish applying manually
+                    </a>
+                  )}
                 </div>
               )}
 
@@ -1526,6 +1834,29 @@ function Dashboard() {
           </>
         )}
       </dialog>
+
+      {/* ── Profile-incomplete gating modal (Auto-Apply requires a full profile) ── */}
+      {gatingFields && (
+        <div className="gating-overlay" onClick={() => setGatingFields(null)}>
+          <div className="auth-card gating-modal" id="apply-gating-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="auth-title" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <Bot size={20} className="text-primary" /> Complete your profile to auto-apply
+            </h3>
+            <p className="auth-subtitle">
+              The apply agent fills employer forms with your saved details. It still needs:
+            </p>
+            <ul className="gating-missing-list">
+              {gatingFields.map((f) => <li key={f}>{f}</li>)}
+            </ul>
+            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+              <RouterLink to="/onboarding" className="btn btn-primary" style={{ textDecoration: 'none', flex: 1, justifyContent: 'center' }}>
+                Complete profile
+              </RouterLink>
+              <button className="btn" onClick={() => setGatingFields(null)}>Not now</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <footer className="app-footer" id="app-footer">
         <span className={`status-indicator ${healthStatus}`} id="footer-status-indicator">

@@ -397,8 +397,243 @@ def init_db():
         """
     )
 
+    # One-to-one careers-page profile per user (Task 9). Kept separate from the
+    # auth-critical `users` table: auth queries stay cheap and the users whitelist
+    # in auth._row_to_user stays untouched. JSON-in-TEXT list fields follow the
+    # resume_jobs.result_json precedent. BOOLEAN columns are nullable on purpose —
+    # NULL means "not answered yet", which the apply-readiness check treats as
+    # missing (the apply agent must never guess work-authorization answers).
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            id {AUTO_PK},
+            user_id INTEGER UNIQUE NOT NULL,
+            full_name TEXT DEFAULT '',
+            email TEXT DEFAULT '',
+            phone TEXT DEFAULT '',
+            address_street TEXT DEFAULT '',
+            address_city TEXT DEFAULT '',
+            address_state TEXT DEFAULT '',
+            address_zip TEXT DEFAULT '',
+            address_country TEXT DEFAULT 'US',
+            linkedin_url TEXT DEFAULT '',
+            github_url TEXT DEFAULT '',
+            portfolio_url TEXT DEFAULT '',
+            authorized_us BOOLEAN,
+            requires_sponsorship BOOLEAN,
+            visa_status TEXT DEFAULT '',
+            desired_roles TEXT DEFAULT '[]',
+            salary_min INTEGER,
+            salary_currency TEXT DEFAULT 'USD',
+            notice_period TEXT DEFAULT '',
+            availability_date TEXT DEFAULT '',
+            willing_to_relocate BOOLEAN,
+            preferred_locations TEXT DEFAULT '[]',
+            years_experience INTEGER,
+            current_title TEXT DEFAULT '',
+            current_company TEXT DEFAULT '',
+            education TEXT DEFAULT '[]',
+            skills TEXT DEFAULT '[]',
+            eeo_gender TEXT DEFAULT 'Decline to self-identify',
+            eeo_race TEXT DEFAULT 'Decline to self-identify',
+            eeo_veteran TEXT DEFAULT 'Decline to self-identify',
+            eeo_disability TEXT DEFAULT 'Decline to self-identify',
+            resume_file {BLOB_TYPE},
+            resume_filename TEXT DEFAULT '',
+            resume_mime TEXT DEFAULT '',
+            resume_text TEXT DEFAULT '',
+            onboarding_completed BOOLEAN DEFAULT FALSE,
+            onboarding_step INTEGER DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    # Apply-agent lane on the existing applications lifecycle row (Task 10).
+    # apply_status is the machine status (queued|running|submitted|needs_review|failed),
+    # orthogonal to the human lifecycle `status`.
+    if not _column_exists(cursor, "applications", "apply_status"):
+        cursor.execute("ALTER TABLE applications ADD COLUMN apply_method TEXT DEFAULT 'manual'")
+        cursor.execute("ALTER TABLE applications ADD COLUMN apply_status TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE applications ADD COLUMN apply_error TEXT DEFAULT ''")
+        cursor.execute(f"ALTER TABLE applications ADD COLUMN apply_screenshot {BLOB_TYPE}")
+        cursor.execute("ALTER TABLE applications ADD COLUMN apply_log TEXT DEFAULT ''")
+        cursor.execute("ALTER TABLE applications ADD COLUMN apply_started_at TEXT")
+        cursor.execute("ALTER TABLE applications ADD COLUMN apply_finished_at TEXT")
+    # Human-in-the-loop verification prompt (added after the first apply_* migration
+    # shipped — separate guard so existing DBs pick it up).
+    if not _column_exists(cursor, "applications", "apply_input_prompt"):
+        cursor.execute("ALTER TABLE applications ADD COLUMN apply_input_prompt TEXT DEFAULT ''")
+
     conn.commit()
     conn.close()
+
+
+# ── User profile (Task 9) ───────────────────────────────────────────────────
+
+# JSON-array columns parsed/serialized transparently by the profile helpers.
+PROFILE_JSON_FIELDS = {"desired_roles", "preferred_locations", "education", "skills"}
+# Nullable tri-state booleans (None = unanswered).
+PROFILE_BOOL_FIELDS = {"authorized_us", "requires_sponsorship", "willing_to_relocate"}
+# Every column the API may read/write (excludes id/user_id/blob/timestamps).
+PROFILE_FIELDS = [
+    "full_name", "email", "phone",
+    "address_street", "address_city", "address_state", "address_zip", "address_country",
+    "linkedin_url", "github_url", "portfolio_url",
+    "authorized_us", "requires_sponsorship", "visa_status",
+    "desired_roles", "salary_min", "salary_currency", "notice_period",
+    "availability_date", "willing_to_relocate", "preferred_locations",
+    "years_experience", "current_title", "current_company", "education", "skills",
+    "eeo_gender", "eeo_race", "eeo_veteran", "eeo_disability",
+    "onboarding_completed", "onboarding_step",
+]
+
+
+def get_user_profile(user_id: int):
+    """The user's profile as a dict (JSON fields parsed, resume blob excluded,
+    `has_resume`/`resume_filename` included). Returns an all-defaults dict when the
+    user has no profile row yet, so callers never need a None branch."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM user_profiles WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        profile = {f: None if f in PROFILE_BOOL_FIELDS else "" for f in PROFILE_FIELDS}
+        for f in PROFILE_JSON_FIELDS:
+            profile[f] = []
+        profile.update(
+            address_country="US", salary_min=None, salary_currency="USD",
+            years_experience=None,
+            eeo_gender="Decline to self-identify", eeo_race="Decline to self-identify",
+            eeo_veteran="Decline to self-identify", eeo_disability="Decline to self-identify",
+            onboarding_completed=False, onboarding_step=0,
+            has_resume=False, resume_filename="", resume_text="",
+        )
+        return profile
+    profile = {f: row[f] for f in PROFILE_FIELDS}
+    for f in PROFILE_JSON_FIELDS:
+        try:
+            profile[f] = json.loads(profile[f]) if profile[f] else []
+        except Exception:
+            profile[f] = []
+    for f in PROFILE_BOOL_FIELDS:
+        profile[f] = None if profile[f] is None else bool(profile[f])
+    profile["onboarding_completed"] = bool(profile["onboarding_completed"])
+    profile["onboarding_step"] = profile["onboarding_step"] or 0
+    profile["has_resume"] = row["resume_file"] is not None
+    profile["resume_filename"] = row["resume_filename"] or ""
+    profile["resume_text"] = row["resume_text"] or ""
+    return profile
+
+
+def get_profile_resume(user_id: int):
+    """Returns (blob, filename, mime, text) for the stored resume, or None."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT resume_file, resume_filename, resume_mime, resume_text "
+        "FROM user_profiles WHERE user_id = ?",
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row or row["resume_file"] is None:
+        return None
+    blob = row["resume_file"]
+    # Postgres BYTEA arrives as memoryview.
+    return (bytes(blob), row["resume_filename"] or "resume", row["resume_mime"] or "", row["resume_text"] or "")
+
+
+def upsert_user_profile(user_id: int, fields: dict):
+    """Dynamic partial upsert of profile fields. JSON-array fields may be passed as
+    lists (serialized here); booleans as bool/None. Unknown keys are the caller's
+    responsibility to filter (profile_api whitelists)."""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    cleaned = {}
+    for k, v in fields.items():
+        if k in PROFILE_JSON_FIELDS and not isinstance(v, str):
+            v = json.dumps(v if v is not None else [])
+        cleaned[k] = v
+    cleaned["updated_at"] = now
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM user_profiles WHERE user_id = ?", (user_id,))
+    exists = cursor.fetchone() is not None
+    if exists:
+        set_clause = ", ".join(f"{k} = ?" for k in cleaned)
+        cursor.execute(
+            f"UPDATE user_profiles SET {set_clause} WHERE user_id = ?",
+            (*cleaned.values(), user_id),
+        )
+    else:
+        cleaned["created_at"] = now
+        cols = ", ".join(["user_id", *cleaned.keys()])
+        placeholders = ", ".join(["?"] * (len(cleaned) + 1))
+        cursor.execute(
+            f"INSERT INTO user_profiles ({cols}) VALUES ({placeholders})",
+            (user_id, *cleaned.values()),
+        )
+    conn.commit()
+    conn.close()
+
+
+def set_profile_resume(user_id: int, blob, filename: str, mime: str, text: str):
+    """Store (or clear, with blob=None) the canonical profile resume."""
+    upsert_user_profile(
+        user_id,
+        {"resume_file": blob, "resume_filename": filename, "resume_mime": mime, "resume_text": text},
+    )
+
+
+# Human-readable labels for apply-readiness gaps, surfaced to the gating modal.
+_APPLY_READY_CHECKS = [
+    ("full_name", "Full name"),
+    ("email", "Email"),
+    ("phone", "Phone number"),
+    ("address_city", "City"),
+    ("address_state", "State"),
+    ("authorized_us", "Work authorization (authorized to work in the US)"),
+    ("requires_sponsorship", "Sponsorship requirement"),
+    ("years_experience", "Years of experience"),
+    ("has_resume", "Resume upload"),
+]
+
+
+def is_profile_apply_ready(profile: dict):
+    """Single source of truth for the Apply gate. The tri-state booleans and
+    years_experience count as present only when actually answered (not None);
+    everything else must be non-empty. Returns (ready, missing_labels)."""
+    missing = []
+    for field, label in _APPLY_READY_CHECKS:
+        value = profile.get(field)
+        if field in PROFILE_BOOL_FIELDS or field == "years_experience":
+            if value is None:
+                missing.append(label)
+        elif not value:
+            missing.append(label)
+    return (not missing, missing)
+
+
+def upsert_agent_application(user_id: int, job_id: int, **fields):
+    """Create-or-update the application row for an agent apply run and set the
+    given apply_* / status fields. Returns the application id."""
+    app_id = create_application(user_id, job_id, status="draft")
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    fields = {**fields, "updated_at": now}
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    cursor.execute(
+        f"UPDATE applications SET {set_clause} WHERE id = ?",
+        (*fields.values(), app_id),
+    )
+    conn.commit()
+    conn.close()
+    return app_id
 
 
 def normalize_pull_query(query: str) -> str:
@@ -716,7 +951,7 @@ def get_application(application_id: int):
 
     cursor.execute(
         """
-        SELECT a.*, j.title, j.company, j.location, j.url
+        SELECT a.*, j.title, j.company, j.location, j.url, j.source
         FROM applications a
         LEFT JOIN jobs j ON a.job_id = j.id
         WHERE a.id = ?
