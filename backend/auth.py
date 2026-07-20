@@ -224,6 +224,22 @@ def _validate_credentials(email: str, password: str):
         )
 
 
+def _with_profile_flags(user: dict) -> dict:
+    """Attach the Task 9 gate flags so login/register responses match /api/me —
+    the dashboard reads user.apply_ready without waiting for a refresh."""
+    from db import get_user_profile, is_profile_apply_ready
+
+    try:
+        profile = get_user_profile(user["id"])
+        ready, _missing = is_profile_apply_ready(profile)
+        user["profile_completed"] = bool(profile.get("onboarding_completed"))
+        user["apply_ready"] = ready
+    except Exception:
+        user["profile_completed"] = False
+        user["apply_ready"] = False
+    return user
+
+
 @router.post("/register")
 async def register(req: RegisterRequest):
     _validate_credentials(req.email, req.password)
@@ -231,7 +247,7 @@ async def register(req: RegisterRequest):
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
     user = create_user(req.email, req.password, req.full_name or "", req.phone or "")
     token = _issue_token(user["id"])
-    return {"token": token, "user": user}
+    return {"token": token, "user": _with_profile_flags(user)}
 
 
 @router.post("/login")
@@ -240,7 +256,7 @@ async def login(req: LoginRequest):
     if row is None or not _verify_password(req.password, row["salt"], row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     token = _issue_token(row["id"])
-    return {"token": token, "user": _row_to_user(row)}
+    return {"token": token, "user": _with_profile_flags(_row_to_user(row))}
 
 
 @router.post("/token")
@@ -273,15 +289,7 @@ async def logout(user: dict = Depends(get_current_user)):
 @router.get("/me")
 async def me(user: dict = Depends(get_current_user)):
     user.pop("_token", None)
-    # Task 9: surface onboarding/apply-gate state on the user object so the frontend
-    # can gate the Auto-Apply button without an extra profile request.
-    from db import get_user_profile, is_profile_apply_ready
-
-    profile = get_user_profile(user["id"])
-    ready, _missing = is_profile_apply_ready(profile)
-    user["profile_completed"] = bool(profile.get("onboarding_completed"))
-    user["apply_ready"] = ready
-    return {"user": user}
+    return {"user": _with_profile_flags(user)}
 
 
 @router.patch("/profile")

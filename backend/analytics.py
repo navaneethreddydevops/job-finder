@@ -3,8 +3,8 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import datetime
-from backend.db import get_db_connection, AUTO_PK
-from backend.auth import get_current_user
+from db import get_db_connection, AUTO_PK
+from auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["analytics"])
 
@@ -106,12 +106,17 @@ def calculate_personal_stats(user_id: str) -> PersonalStats:
     """, (user_id,))
     rejected_count = cursor.fetchone()[0]
 
-    cursor.execute("""
-        SELECT AVG(CAST(match_score AS REAL)) FROM job_match_scores
-        WHERE user_id = ?
-    """, (user_id,))
-    avg_score_row = cursor.fetchone()
-    avg_score = avg_score_row[0] if avg_score_row and avg_score_row[0] else None
+    # job_match_scores belongs to the (not yet wired) matching feature — treat a
+    # missing table as "no scores" rather than failing the whole endpoint.
+    try:
+        cursor.execute("""
+            SELECT AVG(CAST(match_score AS REAL)) FROM job_match_scores
+            WHERE user_id = ?
+        """, (user_id,))
+        avg_score_row = cursor.fetchone()
+        avg_score = avg_score_row[0] if avg_score_row and avg_score_row[0] else None
+    except Exception:
+        avg_score = None
 
     conn.close()
 

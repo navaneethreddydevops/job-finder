@@ -1503,7 +1503,13 @@ function Dashboard() {
                     <div
                       key={job.id || absoluteIdx}
                       id={`job-card-${absoluteIdx}`}
-                      className={`job-card ${job.applied ? 'applied' : ''}`}
+                      className={`job-card ${job.applied ? 'applied' : ''} ${
+                        ['queued', 'running'].includes(applyStates[job.id]?.status)
+                          ? 'agent-live'
+                          : applyStates[job.id]?.status === 'awaiting_input'
+                            ? 'agent-waiting'
+                            : ''
+                      }`}
                       onClick={(e) => { lastFocusRef.current = e.currentTarget; setSelectedJob(job); }}
                       tabIndex={0}
                       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); lastFocusRef.current = e.currentTarget; setSelectedJob(job); } }}

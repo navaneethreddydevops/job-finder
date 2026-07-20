@@ -26,6 +26,7 @@ from db import (
 from auth import init_auth_db, router as auth_router, get_current_user
 from resume import init_resume_db, router as resume_router
 from applications import router as applications_router
+from analytics import router as analytics_router
 from profile_api import router as profile_router
 from apply_agent import router as apply_agent_router, apply_agent_available, recover_stale_apply_runs
 from rate_limit import enforce_rate_limit, RateLimitConfig
@@ -68,6 +69,7 @@ logfire.instrument_anthropic()
 app.include_router(auth_router)
 app.include_router(resume_router)
 app.include_router(applications_router)
+app.include_router(analytics_router)
 app.include_router(profile_router)
 app.include_router(apply_agent_router)
 

@@ -148,6 +148,31 @@ export default function ResumeOptimizer() {
     reader.readAsDataURL(file);
   };
 
+  // The application profile (Task 9) holds the canonical resume — offer it here
+  // as a one-click starting point instead of forcing a re-upload.
+  const [profileResume, setProfileResume] = useState(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const resp = await apiFetch('/api/profile/full');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.profile?.has_resume) setProfileResume(data.profile.resume_filename || 'resume');
+      } catch { /* profile not available — button simply hidden */ }
+    })();
+  }, []);
+
+  const useProfileResume = async () => {
+    try {
+      const resp = await apiFetch('/api/profile/resume');
+      if (!resp.ok) throw new Error('Could not load your profile resume.');
+      const blob = await resp.blob();
+      onFile(new File([blob], profileResume || 'resume.docx', { type: blob.type }));
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
   const optimize = async () => {
     setError('');
     if (!jd.trim()) { setError('Enter a job description / requirement first.'); return; }
@@ -292,6 +317,11 @@ export default function ResumeOptimizer() {
             <div className="resume-pane-tools">
               <button className={`btn btn-sm ${origMode === 'preview' ? 'active' : ''}`} onClick={() => setOrigMode('preview')} disabled={!fileDataUrl}><Eye size={13} /> Preview</button>
               <button className={`btn btn-sm ${origMode === 'edit' ? 'active' : ''}`} onClick={() => { if (!originalText && fileDataUrl) loadResult(); setOrigMode('edit'); }}><Pencil size={13} /> Edit</button>
+              {profileResume && profileResume.toLowerCase().endsWith('.docx') && !fileName && (
+                <button className="btn btn-sm" onClick={useProfileResume} title={`Use ${profileResume} from your application profile`}>
+                  <FileText size={13} /> Use profile resume
+                </button>
+              )}
               <button className="btn btn-sm" onClick={() => fileInputRef.current?.click()}><Upload size={13} /> {fileName ? 'Replace' : 'Upload'}</button>
               <input ref={fileInputRef} type="file" accept=".docx" hidden onChange={(e) => onFile(e.target.files?.[0])} />
             </div>
