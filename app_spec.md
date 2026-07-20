@@ -681,6 +681,190 @@ check of render, persistence across refresh, and request body).
 
 ---
 
+## Task 9 — User profile & onboarding (careers-page data + resume)
+
+Collect everything a typical careers-page application form asks for, once, during a
+skippable post-registration wizard, and store it per user. The stored profile powers the
+autonomous apply agent (Task 10) and pre-fills nothing less than a full application:
+contact, links, work authorization, preferences, experience, optional EEO answers, and a
+canonical resume file.
+
+### Data model — `user_profiles` (db.py, 1:1 with `users`)
+Created in `init_db()` after `ensure_users_table()` (FK ordering for Postgres). Columns:
+- **contact**: `full_name, email, phone, address_street, address_city, address_state,
+  address_zip, address_country DEFAULT 'US'`
+- **links**: `linkedin_url, github_url, portfolio_url`
+- **work auth**: `authorized_us BOOLEAN` (NULL = unanswered), `requires_sponsorship
+  BOOLEAN`, `visa_status TEXT` (`us_citizen|permanent_resident|h1b|opt_ead|tn|other|''`)
+- **preferences**: `desired_roles TEXT '[]'` (JSON array), `salary_min INTEGER`,
+  `salary_currency 'USD'`, `notice_period`, `availability_date`,
+  `willing_to_relocate BOOLEAN`, `preferred_locations TEXT '[]'`
+- **experience**: `years_experience INTEGER`, `current_title`, `current_company`,
+  `education TEXT '[]'` (JSON of `{degree, school, field, year}`), `skills TEXT '[]'`
+- **EEO** (all default `'Decline to self-identify'` — answering is optional):
+  `eeo_gender, eeo_race, eeo_veteran, eeo_disability`
+- **resume** (canonical copy; the resume-optimizer's `resume_jobs` copy is separate, no
+  auto-sync): `resume_file {BLOB_TYPE}, resume_filename, resume_mime, resume_text`
+- **meta**: `onboarding_completed BOOLEAN DEFAULT FALSE`, `onboarding_step INTEGER
+  DEFAULT 0` (resume the wizard where the user left off), `created_at, updated_at`
+
+Helpers: `get_user_profile(user_id)` (JSON parsed, blob excluded, adds `has_resume`),
+`get_profile_resume(user_id)`, `upsert_user_profile(user_id, fields)` (dynamic SET,
+`ON CONFLICT(user_id) DO UPDATE`), and the pure `is_profile_apply_ready(profile) ->
+(bool, missing_fields)` — the single source of truth for the Apply gate: requires
+full name, email, phone, city + state, both work-auth booleans answered,
+years_experience, and an uploaded resume.
+
+### API — `backend/profile.py` (all endpoints require auth)
+- `GET /api/profile/full` — profile + `has_resume`, `resume_filename`, `apply_ready`,
+  `missing_fields`. (Distinct path from auth.py's legacy `PATCH /api/profile`.)
+- `PUT /api/profile/full` — whitelisted dynamic upsert (unknown keys rejected 422);
+  accepts `onboarding_completed`/`onboarding_step`; returns the updated profile with
+  recomputed `apply_ready`.
+- `POST /api/profile/resume` — multipart upload, `.docx` or `.pdf`, 5 MB cap (413).
+  Text extracted via `extract_text_from_docx` (resume.py) or `pypdf`; empty extraction
+  is a warning (`resume_text_empty: true`), not an error — the blob is stored anyway.
+- `GET /api/profile/resume` — StreamingResponse download of the stored file.
+- `DELETE /api/profile/resume`.
+- `GET /api/me` (auth.py) is enriched with `profile_completed` + `apply_ready` so the
+  frontend can gate without an extra request.
+
+### UI — `/onboarding` wizard (frontend/src/pages/Onboarding.jsx, lazy route)
+Registration navigates to `/onboarding` (login keeps its normal redirect). 8 steps:
+Contact (prefilled from the user object) → Links → Work authorization → Preferences →
+Experience → EEO (banner: optional, defaults to Decline; prominent Skip) → Resume
+upload (hidden-file-input + FormData pattern from ResumeOptimizer; `.docx,.pdf`;
+extracted-text preview) → Review & Finish (PUT with `onboarding_completed: true` →
+`updateUser` → dashboard + toast). Every step has "Skip for now" (saves partial data +
+`onboarding_step`, goes to dashboard — the dashboard is never blocked). Each Next
+persists the accumulated diff so a refresh resumes from `GET /api/profile/full`.
+Shared step-form components live in `frontend/src/components/profile/` and are reused
+by Profile.jsx as tabbed sections (same PUT endpoint) so everything stays editable
+later. Styling reuses existing tokens (`.auth-card`, `.control-label`, `.input-text`,
+`.btn-primary`, step chips patterned on `.resume-step-num`).
+
+### Status: ☑ implemented (backend + wizard + profile tabs); verified via TestClient + preview.
+
+---
+
+## Task 10 — Autonomous apply agent (apply from the UI)
+
+An "Auto-Apply" button on each job kicks off a background Claude agent that opens the
+job posting in a **headless browser (Playwright MCP, external stdio MCP server)**,
+fills the employer's application form from the stored Task 9 profile, uploads the
+stored resume, answers screening questions from profile data, and **submits**. On
+success the job is marked applied and the application record advances to `applied`.
+
+### Application row extensions (existing `applications` table, `_column_exists` migrations)
+`apply_method TEXT 'manual'|'agent'`, `apply_status TEXT ''`
+(`queued|running|submitted|needs_review|failed`), `apply_error TEXT`,
+`apply_screenshot {BLOB_TYPE}` (final-state PNG), `apply_log TEXT` (newline-joined
+progress lines, capped ~50 KB), `apply_started_at`, `apply_finished_at`. The agent
+lane rides the same row the UI's status dropdown uses — `apply_status` is the machine
+status, orthogonal to the human lifecycle `status`. Helper:
+`upsert_agent_application(user_id, job_id, **fields)`.
+
+### API — `backend/apply_agent.py` (OAuth env-drop at import, like agent.py)
+- `POST /api/jobs/{job_id}/apply-agent` — gate order: 404 unknown job → 503 when the
+  capability is unavailable (no `npx`, or `APPLY_AGENT_ENABLED=0`) → 409 when the
+  profile isn't apply-ready (body carries `missing_fields` → drives the frontend
+  gating modal) → 409 when this user already has an apply run active → 429 rate limit
+  (`RateLimitConfig.APPLY_AGENT = 10/hour`) → upsert application
+  `{apply_method:'agent', apply_status:'queued', status:'draft'}` → BackgroundTask.
+- `GET /api/jobs/{job_id}/apply-agent/status` — `{apply_status, apply_error,
+  progress_lines, started_at, finished_at, application_id}`; the frontend polls at
+  1500 ms. The global SSE lane (`/api/stream`) belongs to `/api/pull` and is NOT used.
+- `GET /api/applications/{id}/screenshot` — streams the `apply_screenshot` PNG.
+- `GET /api/status` gains `apply_agent_available: bool`.
+
+### Concurrency & recovery
+Separate lane from the search agent's `agent_status`: a module-level per-user
+active-apply set guarded by an `asyncio.Lock`; one apply at a time per user (409
+otherwise). No search-tools run-context usage. On module init, rows stuck in
+`queued|running` are flipped to `failed` ("server restarted").
+
+### Agent (mirrors resume.py's SDK invocation + Logfire thin-span wrapper)
+`ClaudeAgentOptions(model="claude-sonnet-5", permission_mode="bypassPermissions",
+output_format=ApplyResult schema, max_turns=60, mcp_servers={"playwright":
+{"type": "stdio", "command": "npx", "args": ["-y", "@playwright/mcp@latest",
+"--headless", "--isolated", "--output-dir", tmpdir]}})`. Allowed tools are ONLY the
+Playwright browser tools (navigate/snapshot/click/type/fill_form/select_option/
+file_upload/take_screenshot/wait_for/press_key/tabs/navigate_back) — no Bash/Write/
+WebFetch. The resume blob is written to a tempdir file for `browser_file_upload`;
+after the run the newest PNG in `--output-dir` is ingested into `apply_screenshot`;
+the tempdir is removed in `finally`.
+
+**ApplyResult**: `{outcome: submitted|needs_review|failed, reason, confirmation_text,
+screenshot_file, questions_answered: [{question, answer}], blocked_on}`.
+
+**System prompt hard rules**: profile injected as labeled JSON + resume path + job
+info; fill everything derivable from the profile; NEVER fabricate; NEVER guess legally
+significant answers (work authorization, sponsorship, visa status, EEO, criminal
+history, security clearance — verbatim from the profile or stop); EEO answers default
+to "Decline to self-identify". Stop conditions → `needs_review` + screenshot + a
+specific reason: login/account-creation wall, CAPTCHA/bot check, a required question
+unanswerable from the profile, email-verification step, or a closed/404 posting. On
+success: submit, wait for confirmation, screenshot it, return `submitted` with the
+confirmation text. The message-stream loop appends one-line progress entries to
+`apply_log` on each assistant/tool message so polling shows live progress.
+
+**Completion**: `submitted` → `update_application_status('applied')` + job `applied`
+set to true (idempotent — current value checked first) + `apply_status='submitted'`.
+`needs_review`/`failed` → reason + screenshot persisted; lifecycle stays `draft`.
+
+### UI (Dashboard.jsx)
+"Auto-Apply" button on job cards + details dialog (manual "Apply Now & Mark Applied"
+link stays). Click → not apply-ready → gating modal listing `missing_fields` with a
+"Complete profile" button to `/onboarding`; otherwise POST + 1500 ms polling
+(ResumeOptimizer pollRef pattern). Per-job status chip: queued / running (pulse) /
+submitted (green) / needs_review (amber — opens a panel with `apply_error` +
+screenshot fetched via apiFetch→blob) / failed (red). Terminal state → stop polling +
+refetch jobs/applications. Chips hydrate on mount from `GET /api/applications` (its
+response model now includes the apply_* fields). A WebMCP `apply_to_job({job_id})`
+tool mirrors the button. When `apply_agent_available` is false the button is hidden.
+
+### Human-in-the-loop verification (pause/resume)
+Email-verification walls no longer end the run. The agent gets a second in-process SDK
+MCP server, `userinput`, with one tool: `await_user_input(application_id, reason)`.
+When a form demands a verification code sent to the candidate's email (or has a
+required question unanswerable from the profile — max 3 asks per run), the agent calls
+the tool instead of stopping. The handler flips the applications row to
+`apply_status='awaiting_input'` + `apply_input_prompt=<reason>` (new TEXT column) and
+blocks up to ~55 s per call on an asyncio future in the module-level `_live_runs`
+registry; the agent re-calls while it returns `pending` (browser session stays alive
+the whole time). The dashboard poll sees `awaiting_input` → shows an amber "Needs your
+input" chip and an inline input box with the prompt; `POST
+/api/jobs/{job_id}/apply-agent/input {value}` resolves the future, the tool returns
+the value, and the run resumes (status back to `running`). No input for ~8 min →
+the tool returns `expired` and the agent ends the run as `needs_review`. Logins,
+CAPTCHAs, and payment walls remain hard stops — the tool must never be used to relay
+account passwords or bypass bot checks. `awaiting_input` counts as an ACTIVE status
+(concurrency guard, restart recovery, frontend polling).
+
+### Live visual progress
+While a run is active the agent takes a milestone screenshot (`progress-NN-<slug>.png`
+via `browser_take_screenshot`) after each major step — page loaded, form filled,
+resume uploaded, before submit, confirmation. `GET
+/api/jobs/{job_id}/apply-agent/live-screenshot` streams the newest PNG from the run's
+tempdir (404 when no run is live — after the run, the stored `apply_screenshot` blob
+endpoint takes over). The dashboard's Apply Agent panel shows this image (refreshed
+every ~3 s off the status poll, fetched via apiFetch→blob since it's auth-protected)
+with the latest progress line as caption; the raw activity log collapses into a
+"Show activity log" details element.
+
+### Deployment caveat
+Playwright MCP needs Node (`npx`) + downloaded Chromium — available locally, NOT on
+FastAPI Cloud. Capability check at startup (`shutil.which("npx")`, overridable via
+`APPLY_AGENT_ENABLED=0|1`); when off, POST returns 503 and the frontend hides the
+button. Documented in README.
+
+### Status: ☑ implemented (endpoints + agent + UI); TestClient suite with stubbed agent;
+real-agent smoke via the dev-only mock careers form (`APPLY_AGENT_MOCK=1` →
+`GET /api/dev/mock-application`, variants `?mode=captcha|login|weird_question`) driven
+by `backend/diag_apply.py`.
+
+---
+
 # Future Enhancements & Roadmap
 
 This section outlines proposed features and improvements organized by priority and complexity. These enhancements build on the existing foundation and can be implemented incrementally.

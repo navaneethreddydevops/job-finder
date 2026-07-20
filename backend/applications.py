@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
-from backend.db import (
+from db import (
     create_application,
     update_application_status,
     get_application,
@@ -11,7 +11,7 @@ from backend.db import (
     delete_application,
     get_job_for_user,
 )
-from backend.auth import get_current_user
+from auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["applications"])
 
@@ -41,6 +41,13 @@ class ApplicationResponse(BaseModel):
     location: str | None
     url: str | None
     source: str | None
+    # Autonomous apply-agent lane (Task 10). apply_status is the machine status
+    # (queued|running|submitted|needs_review|failed), orthogonal to `status`.
+    apply_method: str | None = "manual"
+    apply_status: str | None = ""
+    apply_error: str | None = ""
+    apply_started_at: str | None = None
+    apply_finished_at: str | None = None
 
 
 class ApplicationDetailResponse(ApplicationResponse):

@@ -14,6 +14,7 @@ import { lazy, Suspense, useState, useEffect } from 'react';
 const ResumeOptimizer = lazy(() => import('./pages/ResumeOptimizer.jsx'));
 const Analytics = lazy(() => import('./pages/Analytics.jsx'));
 const Settings = lazy(() => import('./pages/Settings.jsx'));
+const Onboarding = lazy(() => import('./pages/Onboarding.jsx'));
 import { SpeedInsights } from '@vercel/speed-insights/react';
 import { Analytics as VercelAnalytics } from '@vercel/analytics/react';
 
@@ -92,6 +93,7 @@ function AppContent() {
           <Route path="/register" element={<Register />} />
           <Route path="/" element={<RequireAuth><Dashboard /></RequireAuth>} />
           <Route path="/profile" element={<RequireAuth><Profile /></RequireAuth>} />
+          <Route path="/onboarding" element={<RequireAuth><Onboarding /></RequireAuth>} />
           <Route path="/resume/optimizer" element={<RequireAuth><ResumeOptimizer /></RequireAuth>} />
           <Route path="/analytics" element={<RequireAuth><Analytics /></RequireAuth>} />
           <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />

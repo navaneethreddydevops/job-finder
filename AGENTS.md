@@ -55,7 +55,13 @@ The agent is configured via `ClaudeAgentOptions` in `run_job_finder_agent()`:
   `mcp__jobsearch__tavily_search`).
 * **mcp_servers**: `{"jobsearch": job_search_server}` — an in-process SDK MCP server
   (`backend/search_tools.py`) wrapping the JobSpy scraper and the Exa/Tavily search APIs. This
-  is the only MCP integration; there are no external MCP servers.
+  is the job-finder agent's only MCP integration. The repo's single external MCP server is
+  **Playwright MCP**, used exclusively by the autonomous apply agent (`backend/apply_agent.py`,
+  Task 10): it opens the job posting in a headless browser, fills the employer's application
+  form from the stored `user_profiles` row (Task 9), uploads the stored resume, and submits —
+  falling back to `needs_review` (+ screenshot) on login walls/CAPTCHAs/unanswerable required
+  questions, and never guessing legally significant answers. Do not add external MCP servers
+  to the job-finder orchestrator.
 * **agents**: registers a `job_scout` subagent, which enables the built-in **Task** tool.
 * **output_format**: `JobList.model_json_schema()` for guaranteed structured output.
 
