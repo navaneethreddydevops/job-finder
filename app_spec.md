@@ -766,9 +766,11 @@ status, orthogonal to the human lifecycle `status`. Helper:
 
 ### API — `backend/apply_agent.py` (OAuth env-drop at import, like agent.py)
 - `POST /api/jobs/{job_id}/apply-agent` — gate order: 404 unknown job → 503 when the
-  capability is unavailable (no `npx`, or `APPLY_AGENT_ENABLED=0`) → 409 when the
-  profile isn't apply-ready (body carries `missing_fields` → drives the frontend
-  gating modal) → 409 when this user already has an apply run active → 429 rate limit
+  capability is unavailable (no `PLAYWRIGHT_MCP_URL` and no `npx`, or
+  `APPLY_AGENT_ENABLED=0`) → 409 when the profile isn't apply-ready (body carries
+  `missing_fields` → drives the frontend gating modal) → 409 when this job already
+  has a live apply run → 409 when the user is at the concurrency cap
+  (`APPLY_CONCURRENCY_MAX`, default 3 simultaneous runs) → 429 rate limit
   (`RateLimitConfig.APPLY_AGENT = 10/hour`) → upsert application
   `{apply_method:'agent', apply_status:'queued', status:'draft'}` → BackgroundTask.
 - `GET /api/jobs/{job_id}/apply-agent/status` — `{apply_status, apply_error,
@@ -779,20 +781,32 @@ status, orthogonal to the human lifecycle `status`. Helper:
 
 ### Concurrency & recovery
 Separate lane from the search agent's `agent_status`: a module-level per-user
-active-apply set guarded by an `asyncio.Lock`; one apply at a time per user (409
-otherwise). No search-tools run-context usage. On module init, rows stuck in
-`queued|running` are flipped to `failed` ("server restarted").
+run-count dict (`_active_runs`) guarded by an `asyncio.Lock`; up to
+`APPLY_CONCURRENCY_MAX` (env, default **3**) simultaneous applies per user, and at
+most one live run per job (409 otherwise; slots released in the run's `finally` via
+`_release_run_slot`). No search-tools run-context usage. On module init, rows stuck
+in `queued|running|awaiting_input` are flipped to `failed` ("server restarted").
 
 ### Agent (mirrors resume.py's SDK invocation + Logfire thin-span wrapper)
 `ClaudeAgentOptions(model="claude-sonnet-5", permission_mode="bypassPermissions",
-output_format=ApplyResult schema, max_turns=60, mcp_servers={"playwright":
-{"type": "stdio", "command": "npx", "args": ["-y", "@playwright/mcp@latest",
-"--headless", "--isolated", "--output-dir", tmpdir]}})`. Allowed tools are ONLY the
-Playwright browser tools (navigate/snapshot/click/type/fill_form/select_option/
-file_upload/take_screenshot/wait_for/press_key/tabs/navigate_back) — no Bash/Write/
-WebFetch. The resume blob is written to a tempdir file for `browser_file_upload`;
-after the run the newest PNG in `--output-dir` is ingested into `apply_screenshot`;
-the tempdir is removed in `finally`.
+output_format=ApplyResult schema, max_turns=100, mcp_servers={"playwright": …})`.
+The Playwright server config is **dual-mode** (`_playwright_server_config`): with
+`PLAYWRIGHT_MCP_URL` set → `{"type": "http", "url": f"{base}/mcp", "headers":
+{"Authorization": "Bearer $PLAYWRIGHT_MCP_TOKEN"}}` (the remote sidecar,
+`deploy/playwright-mcp/`); otherwise the local stdio spawn `{"type": "stdio",
+"command": "npx", "args": ["-y", "@playwright/mcp@latest", "--headless",
+"--isolated", "--output-dir", tmpdir]}`. Tool names are identical in both modes.
+Allowed tools are ONLY the Playwright browser tools (navigate/snapshot/click/type/
+fill_form/select_option/file_upload/take_screenshot/wait_for/press_key/tabs/
+navigate_back) — no Bash/Write/WebFetch. The resume blob is written to a tempdir
+file (local mode) or POSTed to the sidecar's `/upload` (remote mode — Playwright
+MCP only allows `browser_file_upload` from under its `--output-dir`, and the
+sidecar's disk is not ours) for `browser_file_upload`. Screenshots are captured
+from base64 **image blocks in MCP tool results** in the message stream
+(`_capture_tool_result_images` → `_live_runs[id]["live_shot"]`) — the only channel
+that works remotely; after the run the newest local PNG (or, failing that, the last
+stream-captured image) is ingested into `apply_screenshot`; the tempdir is removed
+in `finally`.
 
 **ApplyResult**: `{outcome: submitted|needs_review|failed, reason, confirmation_text,
 screenshot_file, questions_answered: [{question, answer}], blocked_on}`.
@@ -821,7 +835,13 @@ submitted (green) / needs_review (amber — opens a panel with `apply_error` +
 screenshot fetched via apiFetch→blob) / failed (red). Terminal state → stop polling +
 refetch jobs/applications. Chips hydrate on mount from `GET /api/applications` (its
 response model now includes the apply_* fields). A WebMCP `apply_to_job({job_id})`
-tool mirrors the button. When `apply_agent_available` is false the button is hidden.
+tool mirrors the button. When `apply_agent_available` is false the button renders
+**disabled with an explanatory tooltip** (hidden only while the flag is still
+undefined, i.e. before the first `/api/status` fetch). Run-start `setStatus` calls
+**merge** into the previous status object so `apply_agent_available` survives
+starting a search. A "N agents applying" chip next to the panel title
+(`#apply-agents-running`) counts jobs whose apply state is queued/running/
+awaiting_input, making concurrent runs visible.
 
 ### Human-in-the-loop verification (pause/resume)
 Email-verification walls no longer end the run. The agent gets a second in-process SDK
@@ -852,11 +872,20 @@ every ~3 s off the status poll, fetched via apiFetch→blob since it's auth-prot
 with the latest progress line as caption; the raw activity log collapses into a
 "Show activity log" details element.
 
-### Deployment caveat
-Playwright MCP needs Node (`npx`) + downloaded Chromium — available locally, NOT on
-FastAPI Cloud. Capability check at startup (`shutil.which("npx")`, overridable via
-`APPLY_AGENT_ENABLED=0|1`); when off, POST returns 503 and the frontend hides the
-button. Documented in README.
+### Deployment — Playwright MCP sidecar (`deploy/playwright-mcp/`)
+FastAPI Cloud has no Node/Chromium, so production uses a **remote sidecar**: a
+Docker image (`mcr.microsoft.com/playwright` base) running `@playwright/mcp` in
+streamable-HTTP mode (`--headless --isolated` — each MCP session gets its own
+browser context, so up to `APPLY_CONCURRENCY_MAX` runs share one sidecar) behind a
+tiny Node proxy (`server.mjs`) that enforces `Authorization: Bearer
+$PLAYWRIGHT_MCP_TOKEN` on every route except `GET /healthz`, accepts resume uploads
+at `POST /upload` (raw body + `x-filename` header → a path under the MCP
+`--output-dir`, swept after 2 h), and pipes everything else to the internal MCP
+port. Deployable to any container host (`fly.toml` included). Backend config:
+`PLAYWRIGHT_MCP_URL` + `PLAYWRIGHT_MCP_TOKEN` (FastAPI Cloud Secrets).
+`apply_agent_available()` = `PLAYWRIGHT_MCP_URL` set OR `npx` on PATH, overridable
+via `APPLY_AGENT_ENABLED=0|1`; when off, POST returns 503 and the frontend disables
+the button. Documented in README.
 
 ### Status: ☑ implemented (endpoints + agent + UI); TestClient suite with stubbed agent;
 real-agent smoke via the dev-only mock careers form (`APPLY_AGENT_MOCK=1` →

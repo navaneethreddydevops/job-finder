@@ -501,7 +501,9 @@ function Dashboard() {
           }),
         });
         if (resp.ok) {
-          setStatus({ status: 'running', query: queryValue });
+          // Merge (don't replace): keep server-provided keys like
+          // apply_agent_available so the Auto-Apply buttons don't vanish mid-run.
+          setStatus(prev => ({ ...prev, status: 'running', query: queryValue }));
           setAgentStartTime(performance.now());
           setConsoleOpen(true);
           startStreaming();
@@ -840,7 +842,7 @@ function Dashboard() {
             setQuery(q); setLogs([]);
             try {
               const resp = await apiFetch('/api/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: q, model: stateRef.current.model }) });
-              if (resp.ok) { setStatus({ status: 'running', query: q }); setAgentStartTime(performance.now()); setConsoleOpen(true); startStreaming(); return { success: true, message: `Scraper initiated for '${q}'` }; }
+              if (resp.ok) { setStatus(prev => ({ ...prev, status: 'running', query: q })); setAgentStartTime(performance.now()); setConsoleOpen(true); startStreaming(); return { success: true, message: `Scraper initiated for '${q}'` }; }
               const e = await resp.json();
               return { success: false, error: e.detail || 'Scraper call failed' };
             } catch (err) { return { success: false, error: err.message }; }
@@ -1403,6 +1405,14 @@ function Dashboard() {
             <h2 className="panel-title">
               Jobs Database
               <span className="panel-title-count"> ({filteredJobs.length} visible)</span>
+              {(() => {
+                const liveApplies = Object.values(applyStates).filter(s => APPLY_ACTIVE.has(s?.status)).length;
+                return liveApplies > 0 ? (
+                  <span className="badge apply-chip apply-chip-active" id="apply-agents-running" style={{ marginLeft: '0.6rem', verticalAlign: 'middle' }}>
+                    <Bot size={11} /> {liveApplies} agent{liveApplies > 1 ? 's' : ''} applying
+                  </span>
+                ) : null;
+              })()}
             </h2>
 
             <div className="panel-toolbar">
@@ -1574,11 +1584,14 @@ function Dashboard() {
                             <Bot size={10} /> {APPLY_CHIP[applyStates[job.id].status].label}
                           </span>
                         )}
-                        {status.apply_agent_available && !job.applied && !APPLY_ACTIVE.has(applyStates[job.id]?.status) && applyStates[job.id]?.status !== 'submitted' && (
+                        {status.apply_agent_available !== undefined && !job.applied && !APPLY_ACTIVE.has(applyStates[job.id]?.status) && applyStates[job.id]?.status !== 'submitted' && (
                           <button
                             className="btn btn-sm apply-agent-btn"
+                            disabled={!status.apply_agent_available}
                             onClick={(e) => { e.stopPropagation(); handleAutoApply(job.id); }}
-                            title="Have the agent fill out and submit this application using your profile"
+                            title={status.apply_agent_available
+                              ? 'Have the agent fill out and submit this application using your profile'
+                              : 'Auto-Apply is unavailable — the browser-agent service is not configured on this deployment'}
                           >
                             <Bot size={12} /> Auto-Apply
                           </button>
@@ -1710,12 +1723,15 @@ function Dashboard() {
                       )}
                     </div>
                     <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                      {status.apply_agent_available && !selectedJob.applied && !APPLY_ACTIVE.has(applyStates[selectedJob.id]?.status) && applyStates[selectedJob.id]?.status !== 'submitted' && (
+                      {status.apply_agent_available !== undefined && !selectedJob.applied && !APPLY_ACTIVE.has(applyStates[selectedJob.id]?.status) && applyStates[selectedJob.id]?.status !== 'submitted' && (
                         <button
                           id="auto-apply-btn"
                           className="btn btn-primary"
+                          disabled={!status.apply_agent_available}
                           onClick={() => handleAutoApply(selectedJob.id)}
-                          title="The agent opens this posting in a headless browser, fills the form from your profile, uploads your resume, and submits"
+                          title={status.apply_agent_available
+                            ? 'The agent opens this posting in a headless browser, fills the form from your profile, uploads your resume, and submits'
+                            : 'Auto-Apply is unavailable — the browser-agent service is not configured on this deployment'}
                         >
                           <Bot size={16} />Auto-Apply with Agent
                         </button>

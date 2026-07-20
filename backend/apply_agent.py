@@ -8,15 +8,21 @@ never guesses legally significant answers — anything it can't answer from the 
 ends the run as ``needs_review`` with a reason and a screenshot.
 
 Runs in its own lane: it does not touch the search agent's ``agent_status`` or the
-search tools' run context, so a job pull and an apply can run concurrently. One apply
-at a time per user; progress is persisted on the ``applications`` row (``apply_*``
-columns) and polled by the frontend — the global SSE stream belongs to ``/api/pull``.
+search tools' run context, so a job pull and an apply can run concurrently. Up to
+``APPLY_CONCURRENCY_MAX`` (default 3) applies per user at once, one per job; progress
+is persisted on the ``applications`` row (``apply_*`` columns) and polled by the
+frontend — the global SSE stream belongs to ``/api/pull``.
 
-Requires Node (``npx``) + Chromium for Playwright MCP — available locally, not on
-FastAPI Cloud. ``apply_agent_available()`` gates the feature (503 when off).
+Browser transport is dual-mode: with ``PLAYWRIGHT_MCP_URL`` set the agent connects to
+the remote Playwright MCP sidecar (``deploy/playwright-mcp/`` — streamable HTTP,
+bearer-auth'd via ``PLAYWRIGHT_MCP_TOKEN``; resumes are POSTed to its ``/upload``
+first, and screenshots are captured from MCP tool-result image blocks in the message
+stream). Without it, the agent spawns ``npx @playwright/mcp`` locally as before.
+``apply_agent_available()`` gates the feature (503 when off).
 """
 
 import asyncio
+import base64
 import glob
 import json
 import os
@@ -25,6 +31,7 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 
+import httpx
 import logfire
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -43,8 +50,10 @@ from claude_agent_sdk import (  # noqa: E402
 from claude_agent_sdk.types import (  # noqa: E402
     AssistantMessage,
     TextBlock,
+    ToolResultBlock,
     ToolUseBlock,
     ResultMessage,
+    UserMessage,
 )
 
 from auth import get_current_user  # noqa: E402
@@ -72,10 +81,31 @@ MAX_INPUT_ASKS = 3
 
 router = APIRouter(prefix="/api", tags=["apply-agent"])
 
-# One apply at a time per user. In-memory is correct here: the deployment is pinned
-# to a single instance (see fastapi-cloud.yml) and BackgroundTasks share this loop.
-_active_users: set[int] = set()
+# Remote Playwright MCP sidecar (deploy/playwright-mcp/). When PLAYWRIGHT_MCP_URL is
+# set the agent talks to it over streamable HTTP instead of spawning npx locally —
+# this is what makes auto-apply work on FastAPI Cloud (no Node/Chromium there).
+PLAYWRIGHT_MCP_URL = os.getenv("PLAYWRIGHT_MCP_URL", "").strip().rstrip("/")
+PLAYWRIGHT_MCP_TOKEN = os.getenv("PLAYWRIGHT_MCP_TOKEN", "").strip()
+
+# Concurrency: up to N applies per user at once (one per job). In-memory is correct
+# here: the deployment is pinned to a single instance (see fastapi-cloud.yml) and
+# BackgroundTasks share this loop.
+APPLY_CONCURRENCY_MAX = max(1, int(os.getenv("APPLY_CONCURRENCY_MAX", "3") or 3))
+_active_runs: dict[int, int] = {}  # user_id → number of live apply runs
 _active_lock = asyncio.Lock()
+
+
+def _use_remote_browser() -> bool:
+    return bool(PLAYWRIGHT_MCP_URL)
+
+
+async def _release_run_slot(user_id: int):
+    async with _active_lock:
+        count = _active_runs.get(user_id, 0) - 1
+        if count > 0:
+            _active_runs[user_id] = count
+        else:
+            _active_runs.pop(user_id, None)
 
 # Live-run registry: application_id → {user_id, job_id, screenshot_dir, future,
 # asked_at}. Powers the human-in-the-loop input hand-off and the live-screenshot
@@ -84,15 +114,16 @@ _live_runs: dict[int, dict] = {}
 
 
 def apply_agent_available() -> bool:
-    """The agent needs Node's npx to launch Playwright MCP. APPLY_AGENT_ENABLED
-    overrides the autodetect in both directions (force-off in prod, force-on when
-    npx lives outside PATH-at-import)."""
+    """The agent needs a browser: either the remote Playwright MCP sidecar
+    (PLAYWRIGHT_MCP_URL) or Node's npx to launch Playwright MCP locally.
+    APPLY_AGENT_ENABLED overrides the autodetect in both directions (force-off,
+    or force-on when npx lives outside PATH-at-import)."""
     override = os.getenv("APPLY_AGENT_ENABLED", "").strip()
     if override in ("0", "false", "no"):
         return False
     if override in ("1", "true", "yes"):
         return True
-    return shutil.which("npx") is not None
+    return _use_remote_browser() or shutil.which("npx") is not None
 
 
 def recover_stale_apply_runs():
@@ -329,7 +360,7 @@ def _build_prompts(application_id: int, profile: dict, job: dict, resume_path: s
 
 
 async def _run_apply_agent_claude(
-    application_id: int, profile: dict, job: dict, resume_path: str, screenshot_dir: str
+    application_id: int, profile: dict, job: dict, resume_path: str, screenshot_dir: str, workdir: str
 ) -> ApplyResult:
     """Logfire-traced wrapper: the Agent SDK spawns the `claude` CLI subprocess, so
     `instrument_anthropic()` can't see this call — trace it with a manual span."""
@@ -337,39 +368,74 @@ async def _run_apply_agent_claude(
         "apply_agent claude run",
         application_id=application_id,
         job_url=job.get("url"),
+        remote_browser=_use_remote_browser(),
     ):
         return await _run_apply_agent_impl(
-            application_id, profile, job, resume_path, screenshot_dir
+            application_id, profile, job, resume_path, screenshot_dir, workdir
         )
 
 
+def _playwright_server_config(screenshot_dir: str) -> dict:
+    """Remote HTTP sidecar when PLAYWRIGHT_MCP_URL is set, local npx stdio otherwise.
+    Tool names (mcp__playwright__browser_*) are identical in both modes."""
+    if _use_remote_browser():
+        config = {"type": "http", "url": f"{PLAYWRIGHT_MCP_URL}/mcp"}
+        if PLAYWRIGHT_MCP_TOKEN:
+            config["headers"] = {"Authorization": f"Bearer {PLAYWRIGHT_MCP_TOKEN}"}
+        return config
+    return {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+            "-y",
+            "@playwright/mcp@latest",
+            "--headless",
+            "--isolated",
+            "--output-dir",
+            screenshot_dir,
+        ],
+    }
+
+
+def _capture_tool_result_images(application_id: int, block: ToolResultBlock):
+    """Screenshots come back as base64 image blocks inside MCP tool results — the
+    only screenshot channel that works for the remote sidecar (its filesystem is
+    not ours). Latest one powers the live view; the last one becomes the stored
+    final screenshot."""
+    if not isinstance(block.content, list):
+        return
+    for item in block.content:
+        if not (isinstance(item, dict) and item.get("type") == "image"):
+            continue
+        data = (item.get("source") or {}).get("data")
+        if not data:
+            continue
+        try:
+            shot = base64.b64decode(data)
+        except Exception:  # noqa: BLE001
+            continue
+        run = _live_runs.get(application_id)
+        if run is not None and shot:
+            run["live_shot"] = shot
+
+
 async def _run_apply_agent_impl(
-    application_id: int, profile: dict, job: dict, resume_path: str, screenshot_dir: str
+    application_id: int, profile: dict, job: dict, resume_path: str, screenshot_dir: str, workdir: str
 ) -> ApplyResult:
     system_prompt, prompt = _build_prompts(application_id, profile, job, resume_path, screenshot_dir)
     options = ClaudeAgentOptions(
         model="claude-sonnet-5",
         # Generous: waiting on human input burns a turn per ~55s pending poll.
         max_turns=100,
-        # cwd = the run's tempdir: Playwright MCP resolves bare screenshot filenames
-        # against the process cwd, so this keeps stray files out of the repo root.
-        cwd=os.path.dirname(screenshot_dir),
+        # cwd = the run's local tempdir: in local mode Playwright MCP resolves bare
+        # screenshot filenames against the process cwd, so this keeps stray files
+        # out of the repo root. (Always local — never the sidecar's remote dir.)
+        cwd=workdir,
         permission_mode="bypassPermissions",
         system_prompt=system_prompt,
         output_format=ApplyResult.model_json_schema(),
         mcp_servers={
-            "playwright": {
-                "type": "stdio",
-                "command": "npx",
-                "args": [
-                    "-y",
-                    "@playwright/mcp@latest",
-                    "--headless",
-                    "--isolated",
-                    "--output-dir",
-                    screenshot_dir,
-                ],
-            },
+            "playwright": _playwright_server_config(screenshot_dir),
             "userinput": user_input_server,
         },
         allowed_tools=PLAYWRIGHT_TOOLS + ["mcp__userinput__await_user_input"],
@@ -393,6 +459,10 @@ async def _run_apply_agent_impl(
                         else:
                             label = f"[tool] {block.name}"
                         _append_apply_log(application_id, label)
+            elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
+                for block in msg.content:
+                    if isinstance(block, ToolResultBlock):
+                        _capture_tool_result_images(application_id, block)
             elif isinstance(msg, ResultMessage):
                 logfire.info(
                     "apply agent result",
@@ -422,13 +492,32 @@ async def _run_apply_agent_impl(
     raise RuntimeError("Apply agent returned no parseable result.")
 
 
-def _ingest_screenshot(application_id: int, screenshot_dir: str, preferred: str = ""):
-    """Store the agent's final screenshot (preferred filename, else newest PNG)."""
+def _store_screenshot_blob(application_id: int, blob: bytes):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE applications SET apply_screenshot = ? WHERE id = ?",
+        (blob, application_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _ingest_screenshot(
+    application_id: int, screenshot_dir: str, preferred: str = "", fallback_blob: bytes | None = None
+):
+    """Store the agent's final screenshot: local file (preferred filename, else
+    newest PNG), falling back to the last image captured from the MCP tool-result
+    stream — the only source in remote-sidecar mode, where screenshots are written
+    to the sidecar's filesystem, not ours."""
     # Playwright MCP may nest output under session subdirectories — search recursively.
     candidates = []
     for ext in ("png", "jpg", "jpeg"):
         candidates += glob.glob(os.path.join(screenshot_dir, "**", f"*.{ext}"), recursive=True)
     if not candidates:
+        if fallback_blob:
+            _store_screenshot_blob(application_id, fallback_blob)
+            return
         try:
             listing = os.listdir(screenshot_dir)
         except OSError:
@@ -445,17 +534,25 @@ def _ingest_screenshot(application_id: int, screenshot_dir: str, preferred: str 
         with open(path, "rb") as f:
             blob = f.read()
     except OSError:
-        return
+        blob = b""
+    if not blob:
+        blob = fallback_blob or b""
     if blob:
-        upsert_fields = {"apply_screenshot": blob}
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE applications SET apply_screenshot = ? WHERE id = ?",
-            (upsert_fields["apply_screenshot"], application_id),
-        )
-        conn.commit()
-        conn.close()
+        _store_screenshot_blob(application_id, blob)
+
+
+async def _upload_resume_to_sidecar(blob: bytes, filename: str) -> tuple[str, str]:
+    """POST the resume to the sidecar's /upload so browser_file_upload can reach it
+    (Playwright MCP only allows uploads from under its --output-dir). Returns the
+    remote (path, dir)."""
+    headers = {"x-filename": filename, "content-type": "application/octet-stream"}
+    if PLAYWRIGHT_MCP_TOKEN:
+        headers["Authorization"] = f"Bearer {PLAYWRIGHT_MCP_TOKEN}"
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(f"{PLAYWRIGHT_MCP_URL}/upload", content=blob, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+    return data["path"], data["dir"]
 
 
 async def run_apply_agent(user_id: int, job_id: int, application_id: int):
@@ -486,19 +583,27 @@ async def run_apply_agent(user_id: int, job_id: int, application_id: int):
             raise RuntimeError("Job or resume disappeared before the run started.")
         blob, filename, _mime, _text = stored
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "resume.pdf"
-        # Inside screenshot_dir on purpose: Playwright MCP only allows file_upload
-        # from its --output-dir roots, and screenshot_dir is that root.
-        resume_path = os.path.join(screenshot_dir, safe_name)
-        with open(resume_path, "wb") as f:
-            f.write(blob)
+        if _use_remote_browser():
+            # The browser runs on the sidecar host: put the resume on ITS disk and
+            # reference the remote paths in the prompts.
+            resume_path, prompt_shots_dir = await _upload_resume_to_sidecar(blob, safe_name)
+        else:
+            # Inside screenshot_dir on purpose: Playwright MCP only allows file_upload
+            # from its --output-dir roots, and screenshot_dir is that root.
+            resume_path = os.path.join(screenshot_dir, safe_name)
+            with open(resume_path, "wb") as f:
+                f.write(blob)
+            prompt_shots_dir = screenshot_dir
 
         result = await _run_apply_agent_claude(
-            application_id, profile, job, resume_path, screenshot_dir
+            application_id, profile, job, resume_path, prompt_shots_dir, workdir
         )
 
         # Search the whole workdir (recursive): screenshots may land in the
         # --output-dir or, for bare filenames, the agent's cwd (also the workdir).
-        _ingest_screenshot(application_id, workdir, result.screenshot_file)
+        # In remote mode nothing lands locally — the tool-result capture is the source.
+        captured = (_live_runs.get(application_id) or {}).get("live_shot")
+        _ingest_screenshot(application_id, workdir, result.screenshot_file, fallback_blob=captured)
         finished = datetime.now(timezone.utc).isoformat()
         if result.outcome == "submitted":
             upsert_agent_application(
@@ -539,7 +644,7 @@ async def run_apply_agent(user_id: int, job_id: int, application_id: int):
         _append_apply_log(application_id, f"Error: {e}")
     finally:
         _live_runs.pop(application_id, None)
-        _active_users.discard(user_id)
+        await _release_run_slot(user_id)
         shutil.rmtree(workdir, ignore_errors=True)
 
 
@@ -560,8 +665,8 @@ async def start_apply_agent(
         raise HTTPException(
             status_code=503,
             detail=(
-                "The apply agent is only available in local/self-hosted deployments "
-                "(it needs Node + a headless browser). Use the manual apply link."
+                "The apply agent's browser service is not configured on this "
+                "deployment. Use the manual apply link."
             ),
         )
 
@@ -576,11 +681,31 @@ async def start_apply_agent(
             },
         )
 
+    # One run per job: never start a second agent on an application that's live.
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT apply_status FROM applications WHERE user_id = ? AND job_id = ?",
+        (user["id"], job_id),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row is not None and (row["apply_status"] or "") in ACTIVE_APPLY_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "An application for this job is already in progress."},
+        )
+
     async with _active_lock:
-        if user["id"] in _active_users:
+        if _active_runs.get(user["id"], 0) >= APPLY_CONCURRENCY_MAX:
             raise HTTPException(
                 status_code=409,
-                detail={"message": "An application is already in progress. Please wait."},
+                detail={
+                    "message": (
+                        f"You already have {APPLY_CONCURRENCY_MAX} applications in "
+                        "progress — wait for one to finish before starting another."
+                    )
+                },
             )
         enforce_rate_limit(
             user["id"],
@@ -588,7 +713,7 @@ async def start_apply_agent(
             limit=RateLimitConfig.APPLY_AGENT,
             window=RateLimitConfig.APPLY_AGENT_WINDOW,
         )
-        _active_users.add(user["id"])
+        _active_runs[user["id"]] = _active_runs.get(user["id"], 0) + 1
 
     try:
         application_id = upsert_agent_application(
@@ -603,8 +728,8 @@ async def start_apply_agent(
         )
         background_tasks.add_task(run_apply_agent, user["id"], job_id, application_id)
     except Exception:
-        # Never leave the user permanently "active" if the run can't start.
-        _active_users.discard(user["id"])
+        # Never leave the slot permanently occupied if the run can't start.
+        await _release_run_slot(user["id"])
         raise
     return {"application_id": application_id, "apply_status": "queued"}
 
@@ -669,6 +794,12 @@ async def live_screenshot(job_id: int, user: dict = Depends(get_current_user)):
     )
     if run is None:
         raise HTTPException(status_code=404, detail="No live apply run for this job.")
+    import io
+
+    # Stream-captured shot first (the only source in remote-sidecar mode) …
+    if run.get("live_shot"):
+        return StreamingResponse(io.BytesIO(run["live_shot"]), media_type="image/png")
+    # … then the local tempdir (local npx mode writes milestone PNGs there).
     candidates = []
     for ext in ("png", "jpg", "jpeg"):
         candidates += glob.glob(os.path.join(run["workdir"], "**", f"*.{ext}"), recursive=True)
@@ -677,8 +808,6 @@ async def live_screenshot(job_id: int, user: dict = Depends(get_current_user)):
     path = max(candidates, key=os.path.getmtime)
     with open(path, "rb") as f:
         data = f.read()
-    import io
-
     return StreamingResponse(io.BytesIO(data), media_type="image/png")
 
 

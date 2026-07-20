@@ -389,12 +389,20 @@ forms. The resume optimizer's `resume_jobs` copy stays separate (no auto-sync).
 ## Autonomous apply agent (`backend/apply_agent.py` — Task 10)
 
 The dashboard's **Auto-Apply** button starts a background Claude agent that opens the job
-URL in a **headless browser via Playwright MCP** (external stdio server: `npx -y
-@playwright/mcp@latest --headless --isolated --output-dir <tmpdir>`), fills the employer's
-form from the stored profile, uploads the resume (the file is written INSIDE the
-`--output-dir` because Playwright MCP only allows `file_upload` from its roots), answers
+URL in a **headless browser via Playwright MCP** — **dual transport**
+(`_playwright_server_config`): with `PLAYWRIGHT_MCP_URL` set, a **remote streamable-HTTP
+sidecar** (`deploy/playwright-mcp/`: Docker image with `@playwright/mcp --headless
+--isolated` behind a bearer-token Node proxy — this is how prod/FastAPI Cloud gets a
+browser); otherwise the local stdio spawn (`npx -y @playwright/mcp@latest --headless
+--isolated --output-dir <tmpdir>`). It fills the employer's form from the stored profile,
+uploads the resume (local mode: the file is written INSIDE the `--output-dir` because
+Playwright MCP only allows `file_upload` from its roots; remote mode: POSTed to the
+sidecar's auth'd `/upload`, which returns a path under its output dir), answers
 screening questions, submits, and returns a structured `ApplyResult`
-(`submitted|needs_review|failed`). Hard prompt rules: never fabricate; never guess legally
+(`submitted|needs_review|failed`). Screenshots (live view + stored final) are captured
+from base64 image blocks in MCP tool results in the message stream
+(`_capture_tool_result_images`) — the only channel that works with the remote sidecar;
+local PNG files remain a fallback. Hard prompt rules: never fabricate; never guess legally
 significant answers (work auth, visa, EEO, clearance…) — stop with `needs_review` +
 screenshot on login walls, CAPTCHAs, or payment requests. The final message
 must be ONLY the ApplyResult JSON (belt-and-braces with `output_format` — keep both).
@@ -406,19 +414,28 @@ future in the `_live_runs` registry while the browser session stays alive; `POST
 /api/jobs/{id}/apply-agent/input` resolves it and the run resumes. Expires after ~8 min
 → `needs_review`. NEVER extend this tool to passwords/logins/CAPTCHAs. **Live view**:
 the agent takes `progress-NN-*.png` milestone screenshots; `GET
-/api/jobs/{id}/apply-agent/live-screenshot` streams the newest one from the live run's
-tempdir and the dashboard shows it (refreshed off the 1.5 s status poll) with the log
-collapsed underneath.
+/api/jobs/{id}/apply-agent/live-screenshot` serves the newest stream-captured image
+from `_live_runs[id]["live_shot"]` first (works in both transports), falling back to
+the live run's local tempdir; the dashboard shows it (refreshed off the 1.5 s status
+poll) with the log collapsed underneath.
 State lives on the `applications` row (`apply_method/apply_status/apply_error/
 apply_screenshot/apply_log/apply_started_at/apply_finished_at`); `submitted` also sets the
 job's `applied` flag and advances the lifecycle to `applied`. **Separate lane** from the
 search agent: it must NOT touch `agent_status`, the SSE log stream, or the search tools'
-run context — the frontend polls `GET /api/jobs/{id}/apply-agent/status` at 1.5 s. One
-apply per user at a time (`_active_users` + lock); rows stuck `queued|running` are failed
-on boot (`recover_stale_apply_runs`). Rate limit `RateLimitConfig.APPLY_AGENT` (10/hr).
-**Capability-gated**: needs Node/`npx` (+ Chromium) — absent on FastAPI Cloud, so
+run context — the frontend polls `GET /api/jobs/{id}/apply-agent/status` at 1.5 s.
+**Concurrency**: up to `APPLY_CONCURRENCY_MAX` (default 3) simultaneous applies per
+user, one per job (`_active_runs` count dict + lock, slots released via
+`_release_run_slot` in the run's `finally`); the dashboard shows an
+"N agents applying" chip (`#apply-agents-running`). Rows stuck
+`queued|running|awaiting_input` are failed on boot (`recover_stale_apply_runs`). Rate
+limit `RateLimitConfig.APPLY_AGENT` (10/hr).
+**Capability-gated**: needs a browser — the remote sidecar (`PLAYWRIGHT_MCP_URL` +
+`PLAYWRIGHT_MCP_TOKEN` FastAPI Cloud secrets → prod path) or local Node/`npx`.
 `apply_agent_available()` (override `APPLY_AGENT_ENABLED=0|1`) drives a 503 and
-`/api/status.apply_agent_available` hides the button. Dev smoke: `APPLY_AGENT_MOCK=1`
+`/api/status.apply_agent_available`; when false the frontend renders the Auto-Apply
+buttons **disabled with a tooltip** (not hidden). The run-start `setStatus` calls in
+`Dashboard.jsx` must **merge** (`setStatus(prev => ({...prev, ...}))`) so the flag
+survives starting a search — don't revert to object-replacing `setStatus`. Dev smoke: `APPLY_AGENT_MOCK=1`
 serves `GET /api/dev/mock-application` (`?mode=captcha|login|weird_question`); run
 `uv run python backend/diag_apply.py [mode]` against it (real Claude run — manual only).
 The `applications.py` router is now wired into main.py (bare imports, not `backend.*`).
