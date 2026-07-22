@@ -863,12 +863,80 @@ def toggle_applied(user_id: int, job_id: int, applied: bool):
     conn.close()
 
 
+def _table_exists(cursor, table: str) -> bool:
+    """Backend-agnostic check for whether a table exists."""
+    if IS_POSTGRES:
+        cursor.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = ?",
+            (table,),
+        )
+    else:
+        cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        )
+    return cursor.fetchone() is not None
+
+
+# Tables holding rows that point at jobs.id. Postgres enforces these FKs, so
+# every child row must go before the jobs themselves or the DELETE fails with a
+# foreign-key violation (this is what broke "reset jobs"). Some of these tables
+# are created lazily by other router modules, hence the existence check.
+_JOB_CHILD_TABLES = (
+    "applications",
+    "bookmarks",
+    "job_skills",
+    "cover_letters",
+    "job_match_scores",
+)
+
+
 def delete_user_jobs(user_id: int):
+    """Delete all of a user's jobs plus everything that references them."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM jobs WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        cursor.execute("SELECT id FROM jobs WHERE user_id = ?", (user_id,))
+        job_ids = [row[0] for row in cursor.fetchall()]
+        if job_ids:
+            placeholders = ",".join("?" for _ in job_ids)
+
+            # application_history hangs off applications, not jobs directly.
+            if _table_exists(cursor, "applications") and _table_exists(
+                cursor, "application_history"
+            ):
+                cursor.execute(
+                    f"""
+                    DELETE FROM application_history
+                    WHERE application_id IN (
+                        SELECT id FROM applications WHERE job_id IN ({placeholders})
+                    )
+                    """,
+                    tuple(job_ids),
+                )
+
+            for table in _JOB_CHILD_TABLES:
+                if _table_exists(cursor, table):
+                    cursor.execute(
+                        f"DELETE FROM {table} WHERE job_id IN ({placeholders})",
+                        tuple(job_ids),
+                    )
+
+        cursor.execute("DELETE FROM jobs WHERE user_id = ?", (user_id,))
+
+        # A reset means "start over": drop the per-query checkpoints too, so the
+        # next pull searches the full window instead of only the hours since the
+        # last run (which would come back empty right after a wipe).
+        if _table_exists(cursor, "pull_checkpoints"):
+            cursor.execute("DELETE FROM pull_checkpoints WHERE user_id = ?", (user_id,))
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ── Application Status Tracking ──────────────────────────────────────────

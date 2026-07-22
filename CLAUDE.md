@@ -267,6 +267,14 @@ SDK MCP tools** (`create_sdk_mcp_server` → server name `jobsearch`):
   `manual:` key anymore; a job without a real posting link is useless in the dashboard.
 - `save_job` preserves the existing `applied` status on update; it returns `True` for a
   new insert, `False` for an update, `None` for a quality-gate drop.
+- `delete_user_jobs` (behind `POST /api/jobs/clear`) must delete **child rows first** —
+  `application_history` → `applications`, `bookmarks`, `job_skills`, `cover_letters`,
+  `job_match_scores` — then the `jobs` rows, and finally the user's `pull_checkpoints`.
+  Postgres enforces the `REFERENCES jobs(id)` FKs (SQLite doesn't by default), so a bare
+  `DELETE FROM jobs` fails with a foreign-key violation for any user who has applied to or
+  bookmarked a job. Clearing the checkpoints is part of the reset: otherwise the next pull
+  narrows its window to "since the last run" and comes back empty. Add any new table with a
+  `job_id` FK to `_JOB_CHILD_TABLES`.
 - `get_user_jobs` sorts **career-portal jobs first** (Workday/Greenhouse/Lever/Ashby/
   Company via a portable `ORDER BY CASE source`, newest-first within each tier) — the
   tier list must mirror `PORTAL_SOURCES` in `agent.py`.
