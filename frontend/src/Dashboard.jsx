@@ -754,7 +754,7 @@ function Dashboard() {
       }
     })();
 
-    return () => { stopped = true; setLiveStreamOn(false); try { controller?.abort(); } catch {} };
+    return () => { stopped = true; setLiveStreamOn(false); try { controller?.abort(); } catch { /* ignore abort errors */ } };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedJob?.id, applyStates[selectedJob?.id]?.status]);
 
