@@ -1,0 +1,140 @@
+# Deploy the Playwright MCP sidecar (deploy/playwright-mcp/) to Google Cloud Run.
+#
+# Mirrors deploy/playwright-mcp/deploy-cloudrun.sh, with one critical difference: CI
+# reuses a STABLE token from a secret instead of generating a fresh one, so the
+# backend's configured PLAYWRIGHT_MCP_TOKEN stays in sync across redeploys.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   GCP_PROJECT_ID        — the GCP project id (billing enabled)
+#   GCP_SA_KEY            — JSON key for a service account with roles:
+#                             roles/run.admin, roles/cloudbuild.builds.editor,
+#                             roles/iam.serviceAccountUser, roles/storage.admin
+#                             (or use Workload Identity Federation instead — see below)
+#   PLAYWRIGHT_MCP_TOKEN  — the SAME bearer token configured on the backend
+#                             (FastAPI Cloud secret). Must be stable across deploys.
+# Optional repository variable:
+#   GCP_REGION            — Cloud Run region (defaults to us-central1)
+#
+# Prefer keyless auth? Replace the `credentials_json` line under "Authenticate" with
+# `workload_identity_provider` + `service_account` and drop the GCP_SA_KEY secret.
+
+name: Deploy Playwright MCP sidecar
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'deploy/playwright-mcp/**'
+      - '.github/workflows/deploy-playwright-mcp.yml'
+  workflow_dispatch: {}
+
+# One deploy at a time; a newer push cancels an in-flight run.
+concurrency:
+  group: deploy-playwright-mcp
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write   # for Workload Identity Federation, if you switch to it
+
+env:
+  SERVICE: job-finder-playwright-mcp
+  REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+
+jobs:
+  deploy:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Guard — required secrets present
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          PLAYWRIGHT_MCP_TOKEN: ${{ secrets.PLAYWRIGHT_MCP_TOKEN }}
+        run: |
+          missing=()
+          [ -n "$GCP_PROJECT_ID" ] || missing+=("GCP_PROJECT_ID")
+          [ -n "$GCP_SA_KEY" ] || missing+=("GCP_SA_KEY")
+          [ -n "$PLAYWRIGHT_MCP_TOKEN" ] || missing+=("PLAYWRIGHT_MCP_TOKEN")
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Missing required secret(s): ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Enable required services (idempotent)
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          gcloud services enable \
+            run.googleapis.com \
+            cloudbuild.googleapis.com \
+            artifactregistry.googleapis.com \
+            --project "$GCP_PROJECT_ID"
+
+      # Sizing mirrors deploy-cloudrun.sh:
+      #   --max-instances 1 + --session-affinity: MCP sessions are stateful (a live
+      #     browser context), so every request of a run must hit the same instance.
+      #   --min-instances 0 keeps it in the always-free tier (first apply pays a cold start).
+      #   --timeout 300 caps a request; the live screencast stream reconnects around it.
+      - name: Deploy to Cloud Run
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          PLAYWRIGHT_MCP_TOKEN: ${{ secrets.PLAYWRIGHT_MCP_TOKEN }}
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --source deploy/playwright-mcp \
+            --project "$GCP_PROJECT_ID" \
+            --region "$REGION" \
+            --memory 2Gi --cpu 2 \
+            --min-instances 0 --max-instances 1 \
+            --concurrency 20 --timeout 300 \
+            --session-affinity \
+            --allow-unauthenticated \
+            --set-env-vars "PLAYWRIGHT_MCP_TOKEN=${PLAYWRIGHT_MCP_TOKEN}" \
+            --quiet
+
+      - name: Health check
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          URL=$(gcloud run services describe "$SERVICE" \
+            --project "$GCP_PROJECT_ID" --region "$REGION" \
+            --format='value(status.url)')
+          echo "Sidecar URL: $URL"
+          # /health, not /healthz — Google's front end intercepts /healthz on *.run.app.
+          for i in $(seq 1 10); do
+            if curl -fsS "$URL/health"; then echo; echo "Healthy."; exit 0; fi
+            echo "waiting for cold start… ($i)"; sleep 6
+          done
+          echo "::error::Sidecar did not pass health check at $URL/health"
+          exit 1
+
+      - name: Deployment summary
+        if: success()
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          URL=$(gcloud run services describe "$SERVICE" \
+            --project "$GCP_PROJECT_ID" --region "$REGION" \
+            --format='value(status.url)')
+          {
+            echo "### Playwright MCP sidecar deployed ✅"
+            echo ""
+            echo "- **Service:** \`$SERVICE\` (region \`$REGION\`)"
+            echo "- **URL:** $URL"
+            echo ""
+            echo "Backend must have \`PLAYWRIGHT_MCP_URL=$URL\` and the matching \`PLAYWRIGHT_MCP_TOKEN\` set on FastAPI Cloud."
+          } >> "$GITHUB_STEP_SUMMARY"
