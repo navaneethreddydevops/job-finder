@@ -127,7 +127,10 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+body::-webkit-scrollbar { width: 0; height: 0; }
 
 ::selection {
   background: rgba(35, 131, 226, 0.18);
@@ -446,6 +449,7 @@ body {
 .stat-icon-wrapper.primary { color: var(--primary); background-color: var(--primary-glow); border-color: rgba(35, 131, 226, 0.2); }
 .stat-icon-wrapper.success { color: var(--success); background-color: var(--success-glow); border-color: rgba(42, 126, 79, 0.2); }
 .stat-icon-wrapper.warning { color: var(--warning); background-color: var(--warning-glow); border-color: rgba(203, 145, 47, 0.25); }
+.stat-icon-wrapper.danger { color: var(--danger); background-color: rgba(224, 62, 62, 0.1); border-color: rgba(224, 62, 62, 0.2); }
 
 .stat-info {
   display: flex;
@@ -1072,6 +1076,15 @@ body {
   border-color: rgba(42, 126, 79, 0.5);
 }
 
+.job-card.needs-review {
+  border-color: rgba(203, 145, 47, 0.4);
+  box-shadow: var(--shadow-sm);
+}
+
+.job-card.needs-review:hover {
+  border-color: rgba(203, 145, 47, 0.55);
+}
+
 .job-card-header {
   display: flex;
   justify-content: space-between;
@@ -1237,8 +1250,8 @@ dialog.job-details-dialog[open] {
   }
 }
 
-dialog.job-details-dialog::-webkit-scrollbar { width: 8px; }
-dialog.job-details-dialog::-webkit-scrollbar-thumb { background-color: rgba(55, 53, 47, 0.2); border-radius: 9999px; }
+dialog.job-details-dialog::-webkit-scrollbar { width: 0; height: 0; }
+dialog.job-details-dialog { scrollbar-width: none; -ms-overflow-style: none; }
 
 dialog.job-details-dialog::backdrop {
   background-color: rgba(15, 15, 15, 0);
@@ -1334,6 +1347,8 @@ dialog.job-details-dialog[open]::backdrop {
   display: flex;
   gap: 0.5rem;
   margin-left: auto;
+  margin-right: -2.25rem;
+  margin-top: 0;
 }
 .modal-header-actions .btn { padding: 0.55rem 1.1rem; }
 
@@ -1932,6 +1947,8 @@ dialog.job-details-dialog[open]::backdrop {
 /* ── 6.3 Stats ───────────────────────────────────────────────────────────── */
 
 .stat-value-success { color: var(--success) !important; }
+.stat-value-warning { color: var(--warning) !important; }
+.stat-value-danger { color: var(--danger) !important; }
 
 .stat-updated {
   display: flex;

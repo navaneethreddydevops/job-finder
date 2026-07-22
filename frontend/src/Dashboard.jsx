@@ -34,6 +34,8 @@ import {
   ListChecks,
   MessageSquare,
   Keyboard,
+  AlertTriangle,
+  XCircle,
 } from 'lucide-react';
 import { Bot } from 'lucide-react';
 import { Link as RouterLink } from 'react-router-dom';
@@ -136,7 +138,7 @@ function Dashboard() {
   const [selectedSource, setSelectedSource] = useState('All');
   const [selectedLocation, setSelectedLocation] = useState('All');
   const [selectedApplied, setSelectedApplied] = useState('All');
-  // Stat-card quick filter: 'all' | 'remote' | 'applied' | 'applications' | 'interviewing'.
+  // Stat-card quick filter: 'all' | 'remote' | 'applied' | 'needs_review' | 'failed'.
   // Driven by clicking the summary cards at the top of the dashboard.
   const [statFilter, setStatFilter] = useState('all');
   const toggleStat = (v) => setStatFilter((cur) => (cur === v ? 'all' : v));
@@ -882,8 +884,8 @@ function Dashboard() {
       // Stat-card quick filter (top summary cards).
       if (statFilter === 'remote' && !isRemote) return false;
       if (statFilter === 'applied' && !job.applied) return false;
-      if (statFilter === 'applications' && !job.application_id) return false;
-      if (statFilter === 'interviewing' && job.application_status !== 'interviewing') return false;
+      if (statFilter === 'needs_review' && applyStates[job.id]?.status !== 'needs_review') return false;
+      if (statFilter === 'failed' && applyStates[job.id]?.status !== 'failed') return false;
       const sl = searchTerm.toLowerCase();
       const matchesSearch = !sl ||
         job.title.toLowerCase().includes(sl) ||
@@ -903,7 +905,7 @@ function Dashboard() {
       return [...result].sort((a, b) => (a.applied ? 1 : 0) - (b.applied ? 1 : 0));
     }
     return result;
-  }, [jobs, searchTerm, selectedSource, selectedLocation, selectedApplied, showBookmarksOnly, statFilter]);
+  }, [jobs, searchTerm, selectedSource, selectedLocation, selectedApplied, showBookmarksOnly, statFilter, applyStates]);
 
   useEffect(() => { setCurrentPage(1); },
     [searchTerm, selectedSource, selectedLocation, selectedApplied, statFilter]);
@@ -917,10 +919,11 @@ function Dashboard() {
     total: jobs.length,
     remote: jobs.filter(j => j.location.toLowerCase().includes('remote')).length,
     applied: jobs.filter(j => j.applied).length,
-    applications: appStats.total_applications,
+    needs_review: jobs.filter(j => applyStates[j.id]?.status === 'needs_review').length,
+    failed: jobs.filter(j => applyStates[j.id]?.status === 'failed').length,
     applied_apps: appStats.applied_count,
     interviewing_apps: appStats.interviewing_count,
-  }), [jobs, appStats]);
+  }), [jobs, appStats, applyStates]);
 
   const lastUpdated = useMemo(() => {
     const dates = jobs.map(j => j.created_at).filter(Boolean).sort();
@@ -1152,26 +1155,26 @@ function Dashboard() {
           </div>
         </button>
 
-        <button type="button" className={`stat-card ${statFilter === 'applications' ? 'active' : ''}`} id="stat-card-applications" aria-pressed={statFilter === 'applications'} onClick={() => toggleStat('applications')} title="Show only jobs with an application record">
-          <div className={`stat-icon-wrapper ${stats.applications > 0 ? 'primary' : ''}`}>
-            <FileText size={22} />
+        <button type="button" className={`stat-card ${statFilter === 'needs_review' ? 'active' : ''}`} id="stat-card-needs-review" aria-pressed={statFilter === 'needs_review'} onClick={() => toggleStat('needs_review')} title="Show only jobs the apply agent flagged for review">
+          <div className={`stat-icon-wrapper ${stats.needs_review > 0 ? 'warning' : ''}`}>
+            <AlertTriangle size={22} />
           </div>
           <div className="stat-info">
-            <span className="stat-label">Applications</span>
-            <span className={`stat-value ${stats.applications > 0 ? 'stat-value-primary' : ''}`}>
-              <AnimatedNumber value={stats.applications} />
+            <span className="stat-label">Needs Review</span>
+            <span className={`stat-value ${stats.needs_review > 0 ? 'stat-value-warning' : ''}`}>
+              <AnimatedNumber value={stats.needs_review} />
             </span>
           </div>
         </button>
 
-        <button type="button" className={`stat-card ${statFilter === 'interviewing' ? 'active' : ''}`} id="stat-card-interviewing" aria-pressed={statFilter === 'interviewing'} onClick={() => toggleStat('interviewing')} title="Show only jobs in the interviewing stage">
-          <div className={`stat-icon-wrapper ${stats.interviewing_apps > 0 ? 'primary' : ''}`}>
-            <Cpu size={22} />
+        <button type="button" className={`stat-card ${statFilter === 'failed' ? 'active' : ''}`} id="stat-card-failed" aria-pressed={statFilter === 'failed'} onClick={() => toggleStat('failed')} title="Show only jobs where the apply agent failed">
+          <div className={`stat-icon-wrapper ${stats.failed > 0 ? 'danger' : ''}`}>
+            <XCircle size={22} />
           </div>
           <div className="stat-info">
-            <span className="stat-label">Interviewing</span>
-            <span className={`stat-value ${stats.interviewing_apps > 0 ? 'stat-value-primary' : ''}`}>
-              <AnimatedNumber value={stats.interviewing_apps} />
+            <span className="stat-label">Failed</span>
+            <span className={`stat-value ${stats.failed > 0 ? 'stat-value-danger' : ''}`}>
+              <AnimatedNumber value={stats.failed} />
             </span>
           </div>
         </button>
@@ -1624,7 +1627,7 @@ function Dashboard() {
             <div className="active-filter-tags">
               {statFilter !== 'all' && (
                 <span className="active-filter-tag">
-                  {{ remote: 'Remote', applied: 'Applied', applications: 'Applications', interviewing: 'Interviewing' }[statFilter]}
+                  {{ remote: 'Remote', applied: 'Applied', needs_review: 'Needs Review', failed: 'Failed' }[statFilter]}
                   <button onClick={() => setStatFilter('all')} aria-label="Remove stat filter"><X size={10} /></button>
                 </span>
               )}
@@ -1680,7 +1683,9 @@ function Dashboard() {
                           ? 'agent-live'
                           : applyStates[job.id]?.status === 'awaiting_input'
                             ? 'agent-waiting'
-                            : ''
+                            : applyStates[job.id]?.status === 'needs_review'
+                              ? 'needs-review'
+                              : ''
                       }`}
                       onClick={(e) => { lastFocusRef.current = e.currentTarget; setSelectedJob(job); }}
                       tabIndex={0}
@@ -1880,7 +1885,7 @@ function Dashboard() {
                         ? 'The agent opens this posting in a headless browser, fills the form from your profile, uploads your resume, and submits'
                         : 'Auto-Apply is unavailable — the browser-agent service is not configured on this deployment'}
                     >
-                      <Bot size={16} />Apply with Agent
+                      <Bot size={16} />Auto Apply
                     </button>
                   </div>
                 )}
