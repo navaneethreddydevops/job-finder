@@ -1807,7 +1807,9 @@ function Dashboard() {
       {/* ── Job Details Dialog ─────────────────────────────────────────────── */}
       <dialog
         ref={dialogRef}
-        className="job-details-dialog"
+        className={`job-details-dialog${
+          APPLY_ACTIVE.has(applyStates[selectedJob?.id]?.status) ? ' apply-live' : ''
+        }`}
         onClose={() => setSelectedJob(null)}
         id="job-details-dialog"
         onKeyDown={(e) => { if (e.key === 'Escape') setSelectedJob(null); }}
@@ -1833,15 +1835,32 @@ function Dashboard() {
                   {selectedJob.location}
                 </span>
               </div>
-              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                <span className="badge badge-source">{selectedJob.source}</span>
-                <span className="badge badge-neutral" style={{ textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
-                  <Calendar size={11} />Found: {selectedJob.date_posted || 'Recently'}
-                </span>
-                {selectedJob.applied && (
-                  <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(42,126,79,0.2)', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
-                    <CheckCircle2 size={11} />Applied
+              <div className="modal-header-badges-row">
+                <div className="modal-header-badges">
+                  <span className="badge badge-source">{selectedJob.source}</span>
+                  <span className="badge badge-neutral" style={{ textTransform: 'none', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
+                    <Calendar size={11} />Found: {selectedJob.date_posted || 'Recently'}
                   </span>
+                  {selectedJob.applied && (
+                    <span className="badge" style={{ backgroundColor: 'var(--success-glow)', color: 'var(--success)', border: '1px solid rgba(42,126,79,0.2)', display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
+                      <CheckCircle2 size={11} />Applied
+                    </span>
+                  )}
+                </div>
+                {status.apply_agent_available !== undefined && !selectedJob.applied && !APPLY_ACTIVE.has(applyStates[selectedJob.id]?.status) && applyStates[selectedJob.id]?.status !== 'submitted' && (
+                  <div className="modal-header-actions">
+                    <button
+                      id="auto-apply-btn"
+                      className="btn btn-primary"
+                      disabled={!status.apply_agent_available}
+                      onClick={() => handleAutoApply(selectedJob.id)}
+                      title={status.apply_agent_available
+                        ? 'The agent opens this posting in a headless browser, fills the form from your profile, uploads your resume, and submits'
+                        : 'Auto-Apply is unavailable — the browser-agent service is not configured on this deployment'}
+                    >
+                      <Bot size={16} />Apply with Agent
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
@@ -1851,41 +1870,26 @@ function Dashboard() {
                 <div className="modal-section" id="modal-section-contact">
                   <span className="modal-section-title">Application & Contact</span>
                   <div className="contact-row">
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem' }}>
-                      {selectedJob.contact_email && (
-                        <div className="contact-item"><Mail size={14} />Email: <a href={`mailto:${selectedJob.contact_email}`}>{selectedJob.contact_email}</a></div>
-                      )}
-                      {selectedJob.contact_phone && (
-                        <div className="contact-item"><Phone size={14} />Phone: {selectedJob.contact_phone}</div>
-                      )}
-                      {selectedJob.url?.startsWith('http') && (
-                        <div className="contact-item"><LinkIcon size={14} /><a href={selectedJob.url} target="_blank" rel="noopener noreferrer">View Original Posting</a></div>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                      {status.apply_agent_available !== undefined && !selectedJob.applied && !APPLY_ACTIVE.has(applyStates[selectedJob.id]?.status) && applyStates[selectedJob.id]?.status !== 'submitted' && (
-                        <button
-                          id="auto-apply-btn"
-                          className="btn btn-primary"
-                          disabled={!status.apply_agent_available}
-                          onClick={() => handleAutoApply(selectedJob.id)}
-                          title={status.apply_agent_available
-                            ? 'The agent opens this posting in a headless browser, fills the form from your profile, uploads your resume, and submits'
-                            : 'Auto-Apply is unavailable — the browser-agent service is not configured on this deployment'}
-                        >
-                          <Bot size={16} />Auto-Apply with Agent
-                        </button>
-                      )}
+                    {(selectedJob.contact_email || selectedJob.contact_phone) && (
+                      <div className="contact-links">
+                        {selectedJob.contact_email && (
+                          <div className="contact-item"><Mail size={14} />Email: <a href={`mailto:${selectedJob.contact_email}`}>{selectedJob.contact_email}</a></div>
+                        )}
+                        {selectedJob.contact_phone && (
+                          <div className="contact-item"><Phone size={14} />Phone: {selectedJob.contact_phone}</div>
+                        )}
+                      </div>
+                    )}
+                    <div className="contact-actions">
                       {selectedJob.url?.startsWith('http') && (
                         <a
                           href={selectedJob.url}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="btn"
-                          onClick={() => { if (!selectedJob.applied) handleToggleApplied(selectedJob.id, selectedJob.applied); }}
                           style={{ textDecoration: 'none' }}
                         >
-                          <LinkIcon size={16} />Apply Now & Mark Applied
+                          <LinkIcon size={16} />View Posting
                         </a>
                       )}
                       <button

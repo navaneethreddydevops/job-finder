@@ -1144,6 +1144,12 @@ dialog.job-details-dialog {
   gap: 1.5rem;
 }
 
+/* While the apply agent is running, widen the modal so the live browser view is clearly visible */
+dialog.job-details-dialog.apply-live {
+  max-width: 1100px;
+  max-height: 92vh;
+}
+
 dialog.job-details-dialog[open] {
   opacity: 1;
   transform: translateY(0) scale(1);
@@ -1232,6 +1238,28 @@ dialog.job-details-dialog[open]::backdrop {
   color: var(--text-secondary);
 }
 
+/* Badges row: source/date badges on the left, primary CTA aligned to the right */
+.modal-header-badges-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+.modal-header-badges {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* Prominent primary CTA in the modal header (Auto-Apply with Agent), pushed right */
+.modal-header-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+.modal-header-actions .btn { padding: 0.55rem 1.1rem; }
+
 .modal-body {
   display: flex;
   flex-direction: column;
@@ -1290,6 +1318,24 @@ dialog.job-details-dialog[open]::backdrop {
   font-weight: 500;
 }
 .contact-item a:hover { text-decoration: underline; }
+
+/* Contact section: chips on top, an aligned action bar below a hairline */
+.contact-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.contact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.contact-actions .btn { flex: 1 1 auto; }
+@media (max-width: 480px) {
+  .contact-actions .btn { flex-basis: 100%; }
+}
 
 /* Empty State */
 .empty-state {
