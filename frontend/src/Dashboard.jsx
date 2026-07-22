@@ -136,6 +136,10 @@ function Dashboard() {
   const [selectedSource, setSelectedSource] = useState('All');
   const [selectedLocation, setSelectedLocation] = useState('All');
   const [selectedApplied, setSelectedApplied] = useState('All');
+  // Stat-card quick filter: 'all' | 'remote' | 'applied' | 'applications' | 'interviewing'.
+  // Driven by clicking the summary cards at the top of the dashboard.
+  const [statFilter, setStatFilter] = useState('all');
+  const toggleStat = (v) => setStatFilter((cur) => (cur === v ? 'all' : v));
 
   // UI state
   const [viewMode, setViewMode] = useState(
@@ -872,8 +876,14 @@ function Dashboard() {
   }, [jobs]);
 
   const filteredJobs = useMemo(() => {
-    return jobs.filter(job => {
+    const result = jobs.filter(job => {
       if (showBookmarksOnly && !job.is_bookmarked) return false;
+      const isRemote = job.location.toLowerCase().includes('remote');
+      // Stat-card quick filter (top summary cards).
+      if (statFilter === 'remote' && !isRemote) return false;
+      if (statFilter === 'applied' && !job.applied) return false;
+      if (statFilter === 'applications' && !job.application_id) return false;
+      if (statFilter === 'interviewing' && job.application_status !== 'interviewing') return false;
       const sl = searchTerm.toLowerCase();
       const matchesSearch = !sl ||
         job.title.toLowerCase().includes(sl) ||
@@ -881,17 +891,22 @@ function Dashboard() {
         job.description.toLowerCase().includes(sl) ||
         job.key_requirements.some(r => r.toLowerCase().includes(sl));
       const matchesSource = selectedSource === 'All' || job.source === selectedSource;
-      const isRemote = job.location.toLowerCase().includes('remote');
       const matchesLocation = selectedLocation === 'All' ||
         (selectedLocation === 'Remote' ? isRemote : !isRemote);
       const matchesApplied = selectedApplied === 'All' ||
         (selectedApplied === 'Applied' ? job.applied : !job.applied);
       return matchesSearch && matchesSource && matchesLocation && matchesApplied;
     });
-  }, [jobs, searchTerm, selectedSource, selectedLocation, selectedApplied, showBookmarksOnly]);
+    // Default view: push applied jobs to the end (stable sort) so page 1 stays
+    // focused on un-applied roles. Skip when explicitly viewing applied only.
+    if (statFilter !== 'applied') {
+      return [...result].sort((a, b) => (a.applied ? 1 : 0) - (b.applied ? 1 : 0));
+    }
+    return result;
+  }, [jobs, searchTerm, selectedSource, selectedLocation, selectedApplied, showBookmarksOnly, statFilter]);
 
   useEffect(() => { setCurrentPage(1); },
-    [searchTerm, selectedSource, selectedLocation, selectedApplied]);
+    [searchTerm, selectedSource, selectedLocation, selectedApplied, statFilter]);
 
   stateRef.current.filteredJobs = filteredJobs;
 
@@ -913,12 +928,13 @@ function Dashboard() {
   }, [jobs]);
 
   const activeFilterCount = [selectedLocation, selectedSource, selectedApplied]
-    .filter(v => v !== 'All').length;
+    .filter(v => v !== 'All').length + (statFilter !== 'all' ? 1 : 0);
 
   const clearAllFilters = () => {
     setSelectedLocation('All');
     setSelectedSource('All'); setSelectedApplied('All');
     setSearchTerm('');
+    setStatFilter('all');
   };
 
   // ── WebMCP tool registration ────────────────────────────────────────────────
@@ -1103,28 +1119,28 @@ function Dashboard() {
 
       {/* ── Stats Cards ────────────────────────────────────────────────────── */}
       <section className="stats-grid" id="stats-summary-panel">
-        <div className="stat-card" id="stat-card-total" title="Total unique remote full-time postings from the last 7 days">
+        <button type="button" className={`stat-card ${statFilter === 'all' ? 'active' : ''}`} id="stat-card-total" aria-pressed={statFilter === 'all'} onClick={() => { clearAllFilters(); }} title="Show all jobs (clear filters)">
           <div className="stat-icon-wrapper primary"><Layers size={22} /></div>
           <div className="stat-info">
             <span className="stat-label">Total Jobs Found</span>
             <span className="stat-value"><AnimatedNumber value={stats.total} /></span>
           </div>
-        </div>
-        <div className="stat-card" id="stat-card-fulltime" title="Remote US full-time roles from 12 sources including LinkedIn, Indeed, Glassdoor, and company career pages">
+        </button>
+        <button type="button" className="stat-card" id="stat-card-fulltime" aria-pressed={false} onClick={() => toggleStat('all')} title="Remote US full-time roles from 12 sources — click to show all">
           <div className="stat-icon-wrapper success"><CheckCircle2 size={22} /></div>
           <div className="stat-info">
             <span className="stat-label">Full-Time Roles</span>
             <span className="stat-value"><AnimatedNumber value={stats.total} /></span>
           </div>
-        </div>
-        <div className="stat-card" id="stat-card-remote" title="Jobs listed as fully remote">
+        </button>
+        <button type="button" className={`stat-card ${statFilter === 'remote' ? 'active' : ''}`} id="stat-card-remote" aria-pressed={statFilter === 'remote'} onClick={() => toggleStat('remote')} title="Show only fully-remote jobs">
           <div className="stat-icon-wrapper warning"><Sparkles size={22} /></div>
           <div className="stat-info">
             <span className="stat-label">Remote Roles</span>
             <span className="stat-value"><AnimatedNumber value={stats.remote} /></span>
           </div>
-        </div>
-        <div className="stat-card" id="stat-card-applied" title="Jobs you've marked as applied">
+        </button>
+        <button type="button" className={`stat-card ${statFilter === 'applied' ? 'active' : ''}`} id="stat-card-applied" aria-pressed={statFilter === 'applied'} onClick={() => toggleStat('applied')} title="Show only jobs you've marked as applied">
           <div className={`stat-icon-wrapper ${stats.applied > 0 ? 'success' : ''}`}>
             <CheckCircle2 size={22} />
           </div>
@@ -1134,9 +1150,9 @@ function Dashboard() {
               <AnimatedNumber value={stats.applied} />
             </span>
           </div>
-        </div>
+        </button>
 
-        <div className="stat-card" id="stat-card-applications" title="Total application records created">
+        <button type="button" className={`stat-card ${statFilter === 'applications' ? 'active' : ''}`} id="stat-card-applications" aria-pressed={statFilter === 'applications'} onClick={() => toggleStat('applications')} title="Show only jobs with an application record">
           <div className={`stat-icon-wrapper ${stats.applications > 0 ? 'primary' : ''}`}>
             <FileText size={22} />
           </div>
@@ -1146,9 +1162,9 @@ function Dashboard() {
               <AnimatedNumber value={stats.applications} />
             </span>
           </div>
-        </div>
+        </button>
 
-        <div className="stat-card" id="stat-card-interviewing" title="Applications in interviewing stage">
+        <button type="button" className={`stat-card ${statFilter === 'interviewing' ? 'active' : ''}`} id="stat-card-interviewing" aria-pressed={statFilter === 'interviewing'} onClick={() => toggleStat('interviewing')} title="Show only jobs in the interviewing stage">
           <div className={`stat-icon-wrapper ${stats.interviewing_apps > 0 ? 'primary' : ''}`}>
             <Cpu size={22} />
           </div>
@@ -1158,7 +1174,7 @@ function Dashboard() {
               <AnimatedNumber value={stats.interviewing_apps} />
             </span>
           </div>
-        </div>
+        </button>
       </section>
 
       {/* last-updated line */}
@@ -1606,6 +1622,12 @@ function Dashboard() {
           {/* Active filter tags */}
           {activeFilterCount > 0 && (
             <div className="active-filter-tags">
+              {statFilter !== 'all' && (
+                <span className="active-filter-tag">
+                  {{ remote: 'Remote', applied: 'Applied', applications: 'Applications', interviewing: 'Interviewing' }[statFilter]}
+                  <button onClick={() => setStatFilter('all')} aria-label="Remove stat filter"><X size={10} /></button>
+                </span>
+              )}
               {selectedApplied !== 'All' && (
                 <span className="active-filter-tag">
                   {selectedApplied}
