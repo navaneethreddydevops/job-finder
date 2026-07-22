@@ -759,7 +759,9 @@ success the job is marked applied and the application record advances to `applie
 `apply_method TEXT 'manual'|'agent'`, `apply_status TEXT ''`
 (`queued|running|submitted|needs_review|failed`), `apply_error TEXT`,
 `apply_screenshot {BLOB_TYPE}` (final-state PNG), `apply_log TEXT` (newline-joined
-progress lines, capped ~50 KB), `apply_started_at`, `apply_finished_at`. The agent
+progress lines, capped ~50 KB), `apply_steps TEXT` (JSON array of structured live-activity
+steps — `{kind,title,detail,url,milestone,ts}`, bounded ~60 — powering the dashboard's live
+view; field **names only**, never values), `apply_started_at`, `apply_finished_at`. The agent
 lane rides the same row the UI's status dropdown uses — `apply_status` is the machine
 status, orthogonal to the human lifecycle `status`. Helper:
 `upsert_agent_application(user_id, job_id, **fields)`.
@@ -820,7 +822,12 @@ specific reason: login/account-creation wall, CAPTCHA/bot check, a required ques
 unanswerable from the profile, email-verification step, or a closed/404 posting. On
 success: submit, wait for confirmation, screenshot it, return `submitted` with the
 confirmation text. The message-stream loop appends one-line progress entries to
-`apply_log` on each assistant/tool message so polling shows live progress.
+`apply_log` on each assistant/tool message so polling shows live progress, and — in the
+same loop — `_describe_tool_use` maps each browser `ToolUseBlock` to a friendly
+**structured step** (`_append_apply_step` → `apply_steps` JSON), advancing a monotonic
+`milestone` from the `progress-NN-*.png` screenshot filenames the agent takes.
+`GET /api/jobs/{job_id}/apply-agent/status` returns `steps[]` + `milestone` alongside
+`progress_lines`.
 
 **Completion**: `submitted` → `update_application_status('applied')` + job `applied`
 set to true (idempotent — current value checked first) + `apply_status='submitted'`.
@@ -843,12 +850,14 @@ starting a search. A "N agents applying" chip next to the panel title
 (`#apply-agents-running`) counts jobs whose apply state is queued/running/
 awaiting_input, making concurrent runs visible.
 
-### Human-in-the-loop verification (pause/resume)
-Email-verification walls no longer end the run. The agent gets a second in-process SDK
+### Human-in-the-loop field prompts (pause/resume)
+Missing field values no longer end the run. The agent gets a second in-process SDK
 MCP server, `userinput`, with one tool: `await_user_input(application_id, reason)`.
-When a form demands a verification code sent to the candidate's email (or has a
-required question unanswerable from the profile — max 3 asks per run), the agent calls
-the tool instead of stopping. The handler flips the applications row to
+Whenever a form needs a value the agent can't derive from the profile or resume — an
+email verification code, a screening question, desired salary/compensation, notice
+period, a required portfolio/video/LinkedIn URL, "how did you hear about us", etc.
+(up to `MAX_INPUT_ASKS` = 12 asks per run) — the agent calls the tool with a one-line
+question naming the field, instead of stopping. The handler flips the applications row to
 `apply_status='awaiting_input'` + `apply_input_prompt=<reason>` (new TEXT column) and
 blocks up to ~55 s per call on an asyncio future in the module-level `_live_runs`
 registry; the agent re-calls while it returns `pending` (browser session stays alive
@@ -856,21 +865,48 @@ the whole time). The dashboard poll sees `awaiting_input` → shows an amber "Ne
 input" chip and an inline input box with the prompt; `POST
 /api/jobs/{job_id}/apply-agent/input {value}` resolves the future, the tool returns
 the value, and the run resumes (status back to `running`). No input for ~8 min →
-the tool returns `expired` and the agent ends the run as `needs_review`. Logins,
-CAPTCHAs, and payment walls remain hard stops — the tool must never be used to relay
-account passwords or bypass bot checks. `awaiting_input` counts as an ACTIVE status
+the tool returns `expired`; the agent then skips the field if optional, else ends as
+`needs_review`. **Non-credential values only**: logins, account creation, CAPTCHAs, and
+payment walls remain hard stops — the tool must never be used to relay account passwords
+or bypass bot checks. `awaiting_input` counts as an ACTIVE status
 (concurrency guard, restart recovery, frontend polling).
 
-### Live visual progress
+### Live visual progress — "what the agent is doing in the browser"
 While a run is active the agent takes a milestone screenshot (`progress-NN-<slug>.png`
 via `browser_take_screenshot`) after each major step — page loaded, form filled,
 resume uploaded, before submit, confirmation. `GET
 /api/jobs/{job_id}/apply-agent/live-screenshot` streams the newest PNG from the run's
 tempdir (404 when no run is live — after the run, the stored `apply_screenshot` blob
-endpoint takes over). The dashboard's Apply Agent panel shows this image (refreshed
-every ~3 s off the status poll, fetched via apiFetch→blob since it's auth-protected)
-with the latest progress line as caption; the raw activity log collapses into a
-"Show activity log" details element.
+endpoint takes over). The dashboard's Apply Agent panel renders a **live activity view**
+(all inside the job's details modal, ids `#apply-stepper` / `#apply-live-view` /
+`#apply-step-timeline`):
+1. **Milestone stepper** — a 5-node stepper (Open form → Fill details → Upload resume →
+   Ready to submit → Confirmation) driven by the `milestone` from the status poll; past
+   nodes show a ✓, the current node pulses.
+2. **Browser window** — a framed browser viewport (URL bar showing the current page host
+   + a `● live` badge). In **remote/prod mode** this is a **true live video stream** of the
+   headless browser (see "Live browser stream" below); in **local `npx` mode** it falls back
+   to the milestone screenshot refreshed every ~3 s. A placeholder shows until the first frame.
+3. **Step timeline** — the structured `steps[]` from the status poll, each with a
+   per-kind icon and a friendly title (+ optional detail like the field names being
+   filled); the newest step pulses while live and the list auto-scrolls to it.
+The raw one-line `apply_log` collapses into a "Raw activity log" details element beneath.
+
+#### Live browser stream (remote sidecar, CDP screencast)
+The sidecar (`deploy/playwright-mcp/server.mjs`) launches Chromium itself with a CDP debug
+port, points `@playwright/mcp` at it via `--cdp-endpoint`, and runs a CDP screencast bridge
+(`Page.startScreencast`, JPEG ~5–10 fps). It exposes bearer-authed
+`GET /screencast?match=<host>` as an MJPEG `multipart/x-mixed-replace` stream, locking each
+subscriber to the page target whose URL contains `match` (the run's job host) and
+`activateTarget`-ing it (Chromium only screencasts the foreground tab). The backend relays this
+via `GET /api/jobs/{job_id}/apply-agent/live-stream` (auth'd; the sidecar bearer stays
+server-side); the frontend opens it with `apiFetch` (token in header, not URL), parses the
+multipart JPEG parts from the `ReadableStream`, and paints them to `#apply-live-canvas`,
+reconnecting whenever the stream ends (absorbs Cloud Run's 300 s request cap). The endpoint
+404s in local mode / when the sidecar has no `/screencast`, so the canvas falls back to the
+screenshot view. **Limitations**: one shared browser screencasts one foreground page at a time,
+so concurrent viewers of different runs contend; two applies to the same host may be ambiguous
+to `match`. Local dev keeps the screenshot view (no sidecar/stream).
 
 ### Deployment — Playwright MCP sidecar (`deploy/playwright-mcp/`)
 FastAPI Cloud has no Node/Chromium, so production uses a **remote sidecar**: a
@@ -881,7 +917,10 @@ tiny Node proxy (`server.mjs`) that enforces `Authorization: Bearer
 $PLAYWRIGHT_MCP_TOKEN` on every route except `GET /healthz`, accepts resume uploads
 at `POST /upload` (raw body + `x-filename` header → a path under the MCP
 `--output-dir`, swept after 2 h), and pipes everything else to the internal MCP
-port. Deployable to any container host (`fly.toml` included). Backend config:
+port. Deployable to any container host — **Google Cloud Run is the documented free-tier
+path** (`deploy-cloudrun.sh`: 2 vCPU/2 GiB, `--max-instances 1 --session-affinity`
+because MCP sessions are stateful, `--min-instances 0` to stay in the always-free
+quota); `fly.toml` remains as a paid always-on alternative. Backend config:
 `PLAYWRIGHT_MCP_URL` + `PLAYWRIGHT_MCP_TOKEN` (FastAPI Cloud Secrets).
 `apply_agent_available()` = `PLAYWRIGHT_MCP_URL` set OR `npx` on PATH, overridable
 via `APPLY_AGENT_ENABLED=0|1`; when off, POST returns 503 and the frontend disables

@@ -5,11 +5,15 @@ FROM mcr.microsoft.com/playwright:v1.54.0-noble
 
 WORKDIR /app
 
-# Install @playwright/mcp at build time (so `npx` at runtime never hits the
-# network) and make sure its pinned Playwright version has a matching Chromium.
+# Install @playwright/mcp at build time and a Chromium build matching ITS
+# bundled Playwright (which may be newer than the base image's). server.mjs runs
+# this installed copy directly (node_modules/.bin/mcp-server-playwright) so the
+# runtime can never resolve a different version from the registry.
+# `ws` powers the CDP screencast bridge (live browser stream); `playwright-core`
+# resolves the bundled Chromium executable path we launch with a CDP debug port.
 RUN npm init -y >/dev/null \
-    && npm install @playwright/mcp@latest \
-    && npx playwright install chromium
+    && npm install @playwright/mcp@latest ws playwright-core \
+    && npx playwright install --with-deps chromium
 
 COPY server.mjs .
 

@@ -466,6 +466,11 @@ def init_db():
     # shipped — separate guard so existing DBs pick it up).
     if not _column_exists(cursor, "applications", "apply_input_prompt"):
         cursor.execute("ALTER TABLE applications ADD COLUMN apply_input_prompt TEXT DEFAULT ''")
+    # Structured live-activity steps (JSON array) powering the dashboard's live
+    # "what the agent is doing in the browser" view — separate guard so existing DBs
+    # pick it up. The rolling apply_log stays as the raw fallback log.
+    if not _column_exists(cursor, "applications", "apply_steps"):
+        cursor.execute("ALTER TABLE applications ADD COLUMN apply_steps TEXT DEFAULT ''")
 
     conn.commit()
     conn.close()
