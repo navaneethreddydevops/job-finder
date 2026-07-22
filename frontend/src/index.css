@@ -2894,7 +2894,7 @@ dialog.job-details-dialog[open]::backdrop {
 /* Live view: browser window + step timeline side by side. */
 .apply-live-grid {
   display: grid;
-  grid-template-columns: 1.2fr 1fr;
+  grid-template-columns: 2fr 1fr;
   gap: 0.75rem;
   margin-top: 0.75rem;
   align-items: start;
@@ -2943,7 +2943,7 @@ dialog.job-details-dialog[open]::backdrop {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 150px;
+  min-height: 340px;
   background: var(--bg-base);
 }
 .apply-browser-shot { max-width: 100%; display: block; animation: fade-in 0.3s ease; }
@@ -2968,7 +2968,7 @@ dialog.job-details-dialog[open]::backdrop {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
-  max-height: 240px;
+  max-height: 360px;
   overflow-y: auto;
 }
 .apply-step {
