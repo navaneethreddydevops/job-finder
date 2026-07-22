@@ -19,7 +19,7 @@ A full-stack, Claude-powered dashboard that researches LinkedIn, Indeed, Glassdo
 * **Authentication**: Email/password login & registration (8+ char passwords), profile editing, and password change. Seeded test user `test@test.com` / `testtest`. Protected endpoints use an OAuth2 bearer scheme, so the interactive Swagger docs at `/docs` have an **Authorize** button — sign in with the test credentials to try them out.
 * **Resume Optimizer** (`/resume/optimizer`): Split-pane tool — paste a job description, drop in your existing Word resume (previewed in-browser), and Claude generates a tailored, downloadable `.docx`. Includes a progress bar and refresh-safe persisted state.
 * **Application-profile onboarding** (`/onboarding`): A skippable 8-step wizard (shown after registration, reopenable from the Profile page) collects everything careers pages ask for — contact + address, LinkedIn/GitHub/portfolio links, **work authorization & sponsorship answers**, salary/availability preferences, experience & education, optional EEO self-identification (defaults to "Decline to self-identify"), and a resume upload (`.docx`/`.pdf`, text auto-extracted). Everything stays editable under **Profile → Application Profile**.
-* **Autonomous Auto-Apply**: An **Auto-Apply** button on each job launches a Claude agent that opens the posting in a **headless browser (Playwright MCP)**, fills the employer's application form from your saved profile, uploads your resume, answers screening questions, and submits — then marks the job applied and advances the application to `applied`. It never fabricates answers and never guesses legally significant questions (work authorization, EEO, clearance…): login walls and CAPTCHAs end the run as **needs review** with the reason and a screenshot in the job's details dialog. When a form asks for an **email verification code** (e.g. Greenhouse) or a required question your profile can't answer, the agent **pauses with the browser session alive** — the dashboard shows a "Needs your input" prompt, you paste the code from your inbox, and the run resumes and submits. While it works you get a **live view**: milestone screenshots of the actual form stream into the job's details dialog, and up to **3 agents can run at once** (one per job — a "N agents applying" chip tracks them). Requires a complete profile (the button walks you to onboarding otherwise) and a headless browser: **Node/`npx`** locally, or in production the **Playwright MCP sidecar** (`deploy/playwright-mcp/`) reached via `PLAYWRIGHT_MCP_URL`/`PLAYWRIGHT_MCP_TOKEN`; with neither configured the button is disabled and the manual apply link remains.
+* **Autonomous Auto-Apply**: An **Auto-Apply** button on each job launches a Claude agent that opens the posting in a **headless browser (Playwright MCP)**, fills the employer's application form from your saved profile, uploads your resume, answers screening questions, and submits — then marks the job applied and advances the application to `applied`. It never fabricates answers and never guesses legally significant questions (work authorization, EEO, clearance…): login walls and CAPTCHAs end the run as **needs review** with the reason and a screenshot in the job's details dialog. When a form asks for an **email verification code** (e.g. Greenhouse) or a required question your profile can't answer, the agent **pauses with the browser session alive** — the dashboard shows a "Needs your input" prompt, you paste the code from your inbox, and the run resumes and submits. While it works you get a **live view** in the job's details dialog that shows *what the agent is doing in the browser*: a **milestone stepper** (open form → fill details → upload resume → ready to submit → confirmation), a running **step-by-step timeline** of each browser action, and — in production — a **true live video stream** of the headless browser (a real-time canvas feed of the agent clicking and typing, via a CDP screencast from the Playwright MCP sidecar; local dev falls back to milestone screenshots). Up to **3 agents can run at once** (one per job — a "N agents applying" chip tracks them). Requires a complete profile (the button walks you to onboarding otherwise) and a headless browser: **Node/`npx`** locally, or in production the **Playwright MCP sidecar** (`deploy/playwright-mcp/`) reached via `PLAYWRIGHT_MCP_URL`/`PLAYWRIGHT_MCP_TOKEN`; with neither configured the button is disabled and the manual apply link remains.
 * **Unified Server**: Serves the static production React build directly from the Python backend (with SPA fallback for client-side routes).
 
 ---
@@ -196,15 +196,18 @@ image (Playwright base) running `@playwright/mcp` in HTTP mode behind a bearer-t
 that also accepts resume uploads (`POST /upload`) and exposes `GET /healthz`. `--isolated`
 gives every MCP session its own browser context, so concurrent applies share one sidecar.
 
-1. Deploy the image to any container host — a Fly.io config is included:
+1. Deploy the image to a container host. **Google Cloud Run is the recommended (free-tier)
+   path** — its always-free quota covers normal apply volume at a browser-capable
+   2 vCPU / 2 GiB size (needs a GCP project with open billing linked, but stays $0 under
+   quota). One command after `gcloud auth login` + project setup:
    ```bash
    cd deploy/playwright-mcp
-   fly launch --copy-config --no-deploy
-   fly secrets set PLAYWRIGHT_MCP_TOKEN=$(openssl rand -hex 32)
-   fly deploy
+   ./deploy-cloudrun.sh     # prints the service URL + generated token
    ```
+   A Fly.io config (`fly.toml`) is kept as a paid, always-on alternative. Full details and
+   sizing rationale: [`deploy/playwright-mcp/README.md`](deploy/playwright-mcp/README.md).
 2. On the backend host (FastAPI Cloud → Project Settings → Secrets) set:
-   - `PLAYWRIGHT_MCP_URL` — the sidecar origin (e.g. `https://job-finder-playwright-mcp.fly.dev`)
+   - `PLAYWRIGHT_MCP_URL` — the sidecar origin (e.g. `https://job-finder-playwright-mcp-….run.app`)
    - `PLAYWRIGHT_MCP_TOKEN` — the same token
 3. Redeploy the backend; `GET /api/status` should now report `apply_agent_available: true`
    and the dashboard's Auto-Apply buttons become active. Without the sidecar the buttons

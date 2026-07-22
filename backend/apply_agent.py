@@ -75,9 +75,13 @@ ACTIVE_APPLY_STATUSES = ("queued", "running", "awaiting_input")
 
 # Human-in-the-loop input: each blocking tool call waits this long before returning
 # "pending" (the agent re-calls); the whole ask expires after INPUT_EXPIRY_SECONDS.
+# MAX_INPUT_ASKS bounds how many distinct things the agent may ask the candidate for
+# in one run — raised from 3 so it can collect any non-credential field values the
+# profile lacks (screening answers, desired salary, a required URL, etc.) instead of
+# bailing to needs_review. Never covers passwords/logins/CAPTCHAs (hard stops).
 INPUT_WAIT_SECONDS = 55
 INPUT_EXPIRY_SECONDS = 8 * 60
-MAX_INPUT_ASKS = 3
+MAX_INPUT_ASKS = 12
 
 router = APIRouter(prefix="/api", tags=["apply-agent"])
 
@@ -147,11 +151,12 @@ def recover_stale_apply_runs():
 # ---------------------------------------------------------------------------
 # Human-in-the-loop input (in-process SDK MCP server "userinput")
 #
-# When the employer's form demands an email verification code (or has a required
-# question the profile can't answer), the agent calls await_user_input instead of
-# aborting. The handler parks the run in `awaiting_input`, the dashboard shows an
-# input box, and POST /api/jobs/{job_id}/apply-agent/input resolves the future —
-# the browser session stays alive throughout. Never used for passwords/CAPTCHAs.
+# When the employer's form needs a value the agent can't derive from the profile —
+# an email verification code, a required screening answer, desired salary, a required
+# URL, etc. — the agent calls await_user_input instead of aborting. The handler parks
+# the run in `awaiting_input`, the dashboard shows an input box, and POST
+# /api/jobs/{job_id}/apply-agent/input resolves the future — the browser session stays
+# alive throughout. Never used for passwords/logins/account-creation/CAPTCHAs (hard stops).
 # ---------------------------------------------------------------------------
 def _set_awaiting_input(application_id: int, prompt: str, awaiting: bool):
     conn = get_db_connection()
@@ -168,13 +173,19 @@ def _set_awaiting_input(application_id: int, prompt: str, awaiting: bool):
 
 @tool(
     "await_user_input",
-    "Ask the candidate for a piece of information you cannot get any other way — an "
-    "email verification code the form sent to their inbox, or (at most 3 times per "
-    "run) a required screening answer missing from the profile. The candidate is "
-    "prompted in their dashboard; this call waits up to ~1 minute. If it returns "
-    "status='pending', call it again with the SAME reason to keep waiting — the ask "
-    "stays open for ~8 minutes total before returning status='expired' (then finish "
-    "as needs_review). NEVER use this for account passwords, logins, or CAPTCHAs.",
+    "Ask the candidate — live, in their dashboard — for a form value you cannot get "
+    "from their profile or resume, so you can keep filling the form instead of stopping. "
+    "Use it for ANY required or important field the profile doesn't answer: an email "
+    "verification code the form sent to their inbox, a screening question, desired "
+    "salary/compensation, notice period, a required portfolio/video/LinkedIn URL, a "
+    "'how did you hear about us', etc. Put the exact question in `reason`, phrased so a "
+    "human can answer in one line (name the field and any options). This call waits up "
+    "to ~1 minute; if it returns status='pending', call it again with the SAME reason to "
+    "keep waiting — the ask stays open ~8 minutes before returning status='expired' "
+    "(then move on: skip the field if optional, else finish as needs_review). You may "
+    "ask up to ~12 times per run; batch related fields into one clear question when you "
+    "can. HARD LIMIT — NEVER use this for account passwords, logins, account creation, "
+    "or CAPTCHAs; those remain immediate needs_review stops (rule 5).",
     {"application_id": int, "reason": str},
 )
 async def await_user_input(args: dict) -> dict:
@@ -196,6 +207,7 @@ async def await_user_input(args: dict) -> dict:
         run["asks"] = run.get("asks", 0) + 1
         _set_awaiting_input(app_id, reason, awaiting=True)
         _append_apply_log(app_id, f"[input needed] {reason}")
+        _append_apply_step(app_id, "input", "Waiting for your input", detail=reason[:160])
 
     if run.get("asks", 0) > MAX_INPUT_ASKS:
         _set_awaiting_input(app_id, "", awaiting=False)
@@ -207,6 +219,7 @@ async def await_user_input(args: dict) -> dict:
         run["future"] = None
         _set_awaiting_input(app_id, "", awaiting=False)
         _append_apply_log(app_id, "[input received] resuming the application.")
+        _append_apply_step(app_id, "input", "Got your input — resuming")
         return {"content": [{"type": "text", "text": json.dumps({"status": "ok", "value": value})}]}
     except asyncio.TimeoutError:
         if loop.time() - run.get("asked_at", loop.time()) > INPUT_EXPIRY_SECONDS:
@@ -279,6 +292,158 @@ def _append_apply_log(application_id: int, line: str):
     conn.close()
 
 
+# ── Structured live steps ───────────────────────────────────────────────────
+# The message-stream loop already sees every browser action + the agent's
+# reasoning; we turn that into a persisted, human-readable step list that powers
+# the dashboard's live "what the agent is doing in the browser" view. Field
+# VALUES are never surfaced (PII) — only field names/labels.
+APPLY_STEPS_MAX = 60
+
+# The 5 milestones mirror the progress-NN screenshot names the prompt instructs
+# the agent to take; the screenshot filename is what advances the stepper.
+_MILESTONE_BY_SCREENSHOT = {
+    "progress-01": 1,
+    "progress-02": 2,
+    "progress-03": 3,
+    "progress-04": 4,
+    "progress-05": 5,
+}
+_MILESTONE_TITLES = {
+    1: "Reached the application form",
+    2: "Filled in your details",
+    3: "Uploaded your resume",
+    4: "Ready to submit the application",
+    5: "Reached the confirmation page",
+}
+
+
+def _hostname(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+
+        return urlparse(url).hostname or url
+    except Exception:  # noqa: BLE001
+        return url
+
+
+def _reset_apply_steps(application_id: int):
+    """Clear any steps left over from a previous run on the same application row."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE applications SET apply_steps = ? WHERE id = ?", ("", application_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def _append_apply_step(
+    application_id: int,
+    kind: str,
+    title: str,
+    *,
+    detail: str = "",
+    url: str = "",
+    milestone: int | None = None,
+):
+    """Append one structured step to the row's apply_steps JSON array, bounded and
+    with a monotonic milestone. Mirrors _append_apply_log (DB is the source of truth)."""
+    title = (title or "").strip()
+    if not title:
+        return
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT apply_steps FROM applications WHERE id = ?", (application_id,))
+    row = cursor.fetchone()
+    if row is None:
+        conn.close()
+        return
+    try:
+        steps = json.loads(row["apply_steps"]) if row["apply_steps"] else []
+        if not isinstance(steps, list):
+            steps = []
+    except Exception:  # noqa: BLE001
+        steps = []
+    prev_ms = max((s.get("milestone", 0) for s in steps), default=0)
+    cur_ms = max(prev_ms, milestone or 0)
+    now = datetime.now(timezone.utc).isoformat()
+    steps.append(
+        {
+            "kind": kind,
+            "title": title[:200],
+            "detail": (detail or "")[:200],
+            "url": url or "",
+            "milestone": cur_ms,
+            "ts": now,
+        }
+    )
+    steps = steps[-APPLY_STEPS_MAX:]
+    # Keep the live registry's milestone in sync for any in-memory consumer.
+    run = _live_runs.get(application_id)
+    if run is not None:
+        run["milestone"] = cur_ms
+    cursor.execute(
+        "UPDATE applications SET apply_steps = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(steps), now, application_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _describe_tool_use(block: ToolUseBlock) -> dict | None:
+    """Map a Playwright tool call (name + args) to a friendly step, or None to skip
+    (page reads / noise). Returns kwargs for _append_apply_step."""
+    name = block.name
+    if not name.startswith("mcp__playwright__browser_"):
+        return None
+    inp = block.input if isinstance(getattr(block, "input", None), dict) else {}
+    action = name.removeprefix("mcp__playwright__browser_")
+
+    if action == "navigate":
+        url = str(inp.get("url") or "")
+        host = _hostname(url)
+        return {"kind": "navigate", "title": f"Opening {host}" if host else "Opening a page", "url": url}
+    if action == "navigate_back":
+        return {"kind": "navigate", "title": "Going back to the previous page"}
+    if action == "click":
+        el = str(inp.get("element") or "").strip() or "a button"
+        return {"kind": "click", "title": f"Clicking “{el}”"}
+    if action == "type":
+        el = str(inp.get("element") or "").strip() or "a field"
+        return {"kind": "fill", "title": f"Typing into “{el}”"}
+    if action == "fill_form":
+        names = []
+        fields = inp.get("fields")
+        if isinstance(fields, list):
+            for f in fields:
+                if isinstance(f, dict):
+                    nm = f.get("name") or f.get("element") or f.get("ref")
+                    if nm:
+                        names.append(str(nm))
+        if names:
+            shown = ", ".join(names[:4]) + (f" +{len(names) - 4} more" if len(names) > 4 else "")
+            return {"kind": "fill", "title": "Filling in the form", "detail": shown}
+        return {"kind": "fill", "title": "Filling in the form"}
+    if action == "select_option":
+        el = str(inp.get("element") or "").strip() or "an option"
+        return {"kind": "select", "title": f"Choosing an option for “{el}”"}
+    if action == "file_upload":
+        return {"kind": "upload", "title": "Uploading your resume"}
+    if action == "wait_for":
+        return {"kind": "wait", "title": "Waiting for the page to update"}
+    if action == "press_key":
+        key = str(inp.get("key") or "").strip()
+        return {"kind": "click", "title": f"Pressing {key}" if key else "Pressing a key"}
+    if action == "take_screenshot":
+        fname = str(inp.get("filename") or "")
+        for prefix, ms in _MILESTONE_BY_SCREENSHOT.items():
+            if prefix in fname:
+                return {"kind": "milestone", "title": _MILESTONE_TITLES[ms], "milestone": ms}
+        return None  # non-milestone screenshot — skip the noise
+    # snapshot / tabs / anything else: internal, not user-facing
+    return None
+
+
 def _build_prompts(application_id: int, profile: dict, job: dict, resume_path: str, screenshot_dir: str):
     """System + task prompts for the apply run. The profile is the ONLY source of
     truth for answers; legally significant questions must never be guessed."""
@@ -308,16 +473,24 @@ def _build_prompts(application_id: int, profile: dict, job: dict, resume_path: s
         "a login or account-creation wall; a CAPTCHA or bot check; a payment request; "
         "or the posting is closed/removed/404. Never create accounts, never enter "
         "passwords, never try to defeat bot detection.\n"
-        "6. ASK THE CANDIDATE instead of stopping when the form (a) sends an email "
-        "verification code to the candidate's inbox and asks for it, or (b) has a "
-        "REQUIRED screening question the profile cannot answer: call "
+        "6. ASK THE CANDIDATE instead of stopping whenever the form needs a value you "
+        "cannot get from the profile or resume — do NOT fabricate it and do NOT bail to "
+        "needs_review while a required field is merely unknown. This covers: (a) an email "
+        "verification code sent to the candidate's inbox; (b) any REQUIRED screening "
+        "question the profile can't answer; and (c) any other required-or-important field "
+        "with no profile value — desired salary/compensation, notice period / start date, "
+        "a required portfolio/video/LinkedIn/GitHub URL, 'how did you hear about us', "
+        "years with a specific tool, etc. Call "
         f"mcp__userinput__await_user_input with application_id={application_id} and a "
-        "specific reason (e.g. 'Enter the 8-character code Greenhouse emailed to "
-        "you@example.com'). The candidate sees the reason in their dashboard and "
-        "types the answer. While it returns status=pending, keep calling it with the "
-        "same reason; on status=ok use the value; on status=expired finish as "
-        "needs_review. At most 3 distinct asks per run. NEVER use it for passwords, "
-        "logins, or CAPTCHAs — those remain hard stops under rule 5.\n"
+        "specific one-line `reason` that names the field and lists any choices (e.g. "
+        "'Desired annual salary in USD?' or 'Enter the 8-character code Greenhouse "
+        "emailed to you@example.com' or 'Are you willing to relocate? yes/no'). The "
+        "candidate answers it live in their dashboard. While it returns status=pending, "
+        "keep calling with the SAME reason; on status=ok use the value; on "
+        "status=expired, skip the field if it is optional, otherwise finish as "
+        "needs_review. Ask for one field (or a small batch of related fields) per call, "
+        "up to ~12 distinct asks per run. NEVER use it for passwords, logins, "
+        "account creation, or CAPTCHAs — those remain hard stops under rule 5.\n"
         "7. LIVE PROGRESS: after each major milestone — application form reached, "
         "form fields filled, resume uploaded, just before submitting, and the "
         "confirmation page — take a screenshot named progress-01-loaded.png, "
@@ -453,12 +626,16 @@ async def _run_apply_agent_impl(
                         first_line = block.text.strip().splitlines()[0] if block.text.strip() else ""
                         if first_line:
                             _append_apply_log(application_id, first_line[:200])
+                            _append_apply_step(application_id, "thought", first_line[:160])
                     elif isinstance(block, ToolUseBlock):
                         if block.name.startswith("mcp__playwright__browser_"):
                             label = f"[browser] {block.name.removeprefix('mcp__playwright__browser_')}"
                         else:
                             label = f"[tool] {block.name}"
                         _append_apply_log(application_id, label)
+                        desc = _describe_tool_use(block)
+                        if desc:
+                            _append_apply_step(application_id, **desc)
             elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
                 for block in msg.content:
                     if isinstance(block, ToolResultBlock):
@@ -574,7 +751,9 @@ async def run_apply_agent(user_id: int, job_id: int, application_id: int):
         upsert_agent_application(
             user_id, job_id, apply_status="running", apply_started_at=now
         )
+        _reset_apply_steps(application_id)
         _append_apply_log(application_id, "Starting application run…")
+        _append_apply_step(application_id, "start", "Starting the application…")
 
         job = get_job_for_user(job_id, user_id)
         profile = get_user_profile(user_id)
@@ -621,6 +800,13 @@ async def run_apply_agent(user_id: int, job_id: int, application_id: int):
                 application_id,
                 f"Submitted. {result.confirmation_text}".strip(),
             )
+            _append_apply_step(
+                application_id,
+                "done",
+                "Application submitted",
+                detail=(result.confirmation_text or "")[:160],
+                milestone=5,
+            )
         else:
             status = "needs_review" if result.outcome == "needs_review" else "failed"
             reason = result.reason or result.blocked_on or "The agent could not finish."
@@ -632,6 +818,12 @@ async def run_apply_agent(user_id: int, job_id: int, application_id: int):
                 apply_finished_at=finished,
             )
             _append_apply_log(application_id, f"Stopped ({status}): {reason}")
+            _append_apply_step(
+                application_id,
+                "stopped",
+                "Needs your review" if status == "needs_review" else "Could not finish",
+                detail=reason[:160],
+            )
     except Exception as e:  # noqa: BLE001
         finished = datetime.now(timezone.utc).isoformat()
         upsert_agent_application(
@@ -642,6 +834,7 @@ async def run_apply_agent(user_id: int, job_id: int, application_id: int):
             apply_finished_at=finished,
         )
         _append_apply_log(application_id, f"Error: {e}")
+        _append_apply_step(application_id, "stopped", "The run hit an error", detail=str(e)[:160])
     finally:
         _live_runs.pop(application_id, None)
         await _release_run_slot(user_id)
@@ -740,21 +933,30 @@ async def apply_agent_status(job_id: int, user: dict = Depends(get_current_user)
     cursor = conn.cursor()
     cursor.execute(
         "SELECT id, apply_status, apply_error, apply_log, apply_input_prompt, "
-        "apply_started_at, apply_finished_at FROM applications "
+        "apply_steps, apply_started_at, apply_finished_at FROM applications "
         "WHERE user_id = ? AND job_id = ?",
         (user["id"], job_id),
     )
     row = cursor.fetchone()
     conn.close()
     if row is None:
-        return {"apply_status": "", "progress_lines": [], "application_id": None}
+        return {"apply_status": "", "progress_lines": [], "steps": [], "milestone": 0, "application_id": None}
     lines = [ln for ln in (row["apply_log"] or "").splitlines() if ln.strip()]
+    try:
+        steps = json.loads(row["apply_steps"]) if row["apply_steps"] else []
+        if not isinstance(steps, list):
+            steps = []
+    except Exception:  # noqa: BLE001
+        steps = []
+    milestone = max((s.get("milestone", 0) for s in steps), default=0)
     return {
         "application_id": row["id"],
         "apply_status": row["apply_status"] or "",
         "apply_error": row["apply_error"] or "",
         "apply_input_prompt": row["apply_input_prompt"] or "",
         "progress_lines": lines[-40:],
+        "steps": steps[-40:],
+        "milestone": milestone,
         "started_at": row["apply_started_at"],
         "finished_at": row["apply_finished_at"],
         "has_live_screenshot": row["id"] in _live_runs,
@@ -809,6 +1011,67 @@ async def live_screenshot(job_id: int, user: dict = Depends(get_current_user)):
     with open(path, "rb") as f:
         data = f.read()
     return StreamingResponse(io.BytesIO(data), media_type="image/png")
+
+
+@router.get("/jobs/{job_id}/apply-agent/live-stream")
+async def live_stream(job_id: int, user: dict = Depends(get_current_user)):
+    """True live MJPEG stream of the headless browser (remote sidecar only). Relays
+    the sidecar's CDP screencast so the sidecar bearer token stays server-side; the
+    frontend fetches this with its own auth header. 404 in local mode / when no run is
+    live, so the frontend falls back to the milestone-screenshot view."""
+    run = next(
+        (r for r in _live_runs.values() if r["user_id"] == user["id"] and r["job_id"] == job_id),
+        None,
+    )
+    if run is None or not _use_remote_browser():
+        raise HTTPException(status_code=404, detail="No live browser stream for this job.")
+
+    # Match the run to the right browser target by the job's host.
+    job = get_job_for_user(job_id, user["id"])
+    match = ""
+    if job and job.get("url"):
+        host = _hostname(job["url"])
+        match = host if host and "://" not in host else ""
+
+    headers = {}
+    if PLAYWRIGHT_MCP_TOKEN:
+        headers["Authorization"] = f"Bearer {PLAYWRIGHT_MCP_TOKEN}"
+    params = {"match": match} if match else {}
+
+    # Open the upstream stream and inspect the status BEFORE returning, so a sidecar
+    # that doesn't expose /screencast (e.g. an older deployment) surfaces as a clean
+    # 404 → the frontend falls back to the milestone-screenshot view instead of
+    # reconnect-looping on an empty 200. read=None: the screencast is long-lived; the
+    # managed host caps the request duration and the frontend reconnects (like the SSE log).
+    client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None))
+    stream_cm = client.stream(
+        "GET", f"{PLAYWRIGHT_MCP_URL}/screencast", params=params, headers=headers
+    )
+    try:
+        resp = await stream_cm.__aenter__()
+    except Exception:  # noqa: BLE001 — sidecar unreachable
+        await client.aclose()
+        raise HTTPException(status_code=404, detail="Live browser stream unavailable.")
+    if resp.status_code != 200 or "multipart" not in resp.headers.get("content-type", ""):
+        await stream_cm.__aexit__(None, None, None)
+        await client.aclose()
+        raise HTTPException(status_code=404, detail="Live browser stream unavailable.")
+
+    async def relay():
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        except Exception:  # noqa: BLE001 — upstream drop / client disconnect ends the stream
+            pass
+        finally:
+            await stream_cm.__aexit__(None, None, None)
+            await client.aclose()
+
+    return StreamingResponse(
+        relay(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/applications/{application_id}/screenshot")

@@ -406,20 +406,46 @@ local PNG files remain a fallback. Hard prompt rules: never fabricate; never gue
 significant answers (work auth, visa, EEO, clearance…) — stop with `needs_review` +
 screenshot on login walls, CAPTCHAs, or payment requests. The final message
 must be ONLY the ApplyResult JSON (belt-and-braces with `output_format` — keep both).
-**Human-in-the-loop**: email-verification codes and unanswerable required questions do
-NOT stop the run — the agent calls the in-process `userinput` SDK MCP tool
-`await_user_input(application_id, reason)`, which parks the row in
-`apply_status='awaiting_input'` (+ `apply_input_prompt`) and blocks ~55 s per call on a
-future in the `_live_runs` registry while the browser session stays alive; `POST
-/api/jobs/{id}/apply-agent/input` resolves it and the run resumes. Expires after ~8 min
-→ `needs_review`. NEVER extend this tool to passwords/logins/CAPTCHAs. **Live view**:
-the agent takes `progress-NN-*.png` milestone screenshots; `GET
-/api/jobs/{id}/apply-agent/live-screenshot` serves the newest stream-captured image
-from `_live_runs[id]["live_shot"]` first (works in both transports), falling back to
-the live run's local tempdir; the dashboard shows it (refreshed off the 1.5 s status
-poll) with the log collapsed underneath.
+**Human-in-the-loop**: any form value the agent can't derive from the profile — an
+email-verification code, a screening question, desired salary, notice period, a required
+portfolio/video URL, etc. — does NOT stop the run. The agent calls the in-process
+`userinput` SDK MCP tool `await_user_input(application_id, reason)` with a one-line
+question naming the field; it parks the row in `apply_status='awaiting_input'` (+
+`apply_input_prompt`) and blocks ~55 s per call on a future in the `_live_runs` registry
+while the browser session stays alive; `POST /api/jobs/{id}/apply-agent/input` resolves it
+and the run resumes. Up to `MAX_INPUT_ASKS` (12) distinct asks per run; each expires after
+~8 min → skip if optional else `needs_review`. This is the ONLY human-in-the-loop channel
+and it is for **non-credential field values only** — NEVER extend it to passwords, logins,
+account creation, or CAPTCHAs, which stay hard `needs_review` stops (prompt rule 5).
+**Live view**:
+the dashboard renders a live "what the agent is doing in the browser" view inside the
+job-details modal's Apply Agent section — a **5-node milestone stepper** (Open form →
+Fill details → Upload resume → Ready to submit → Confirmation), the live screenshot
+framed as a **browser window** with a URL bar (current page host) and a `● live` badge,
+and a **step timeline** narrating each browser action. The steps are **structured**:
+the message-stream loop (`_run_apply_agent_impl`) maps every `ToolUseBlock` to a friendly
+step via `_describe_tool_use` (field **names only**, never values — PII) and persists them
+with `_append_apply_step` to the `applications.apply_steps` JSON column (bounded ~60), with
+a monotonic `milestone` derived from the agent's `progress-NN-*.png` screenshot filenames
+(the raw `apply_log` blob is kept as the collapsible fallback log). `GET
+/api/jobs/{id}/apply-agent/status` returns `steps[]` + `milestone` alongside
+`progress_lines`. The browser-frame viewport shows a **true live video stream** of the
+headless browser (**remote sidecar only**): the sidecar (`deploy/playwright-mcp/server.mjs`)
+launches Chromium with a CDP debug port, points MCP at it via `--cdp-endpoint`, runs a
+`Page.startScreencast` bridge, and exposes `GET /screencast?match=<host>` as an MJPEG
+(`multipart/x-mixed-replace`) stream; `GET /api/jobs/{id}/apply-agent/live-stream` relays it
+(bearer token stays **server-side**; the frontend auths via `apiFetch` header and paints
+frames to a `<canvas>` via a fetch-based MJPEG reader, reconnecting when the managed host caps
+the request). **Active-tab caveat**: Chromium screencasts only the foreground page, so the
+bridge `activateTarget`s the page a viewer locks onto (matched by job host) — concurrent
+viewers of *different* pages in the one shared browser contend. **Fallback chain**: live canvas
+→ `GET /api/jobs/{id}/apply-agent/live-screenshot` milestone PNG (both transports; the ONLY
+live view in **local `npx` mode**, which has no sidecar/stream) → stored final screenshot →
+placeholder. The stream endpoint 404s in local mode / when the sidecar lacks `/screencast`, so
+the frontend degrades cleanly. Frontend surfaces carry ids `#apply-stepper`, `#apply-live-view`,
+`#apply-step-timeline`, `#apply-live-canvas`.
 State lives on the `applications` row (`apply_method/apply_status/apply_error/
-apply_screenshot/apply_log/apply_started_at/apply_finished_at`); `submitted` also sets the
+apply_screenshot/apply_log/apply_steps/apply_started_at/apply_finished_at`); `submitted` also sets the
 job's `applied` flag and advances the lifecycle to `applied`. **Separate lane** from the
 search agent: it must NOT touch `agent_status`, the SSE log stream, or the search tools'
 run context — the frontend polls `GET /api/jobs/{id}/apply-agent/status` at 1.5 s.

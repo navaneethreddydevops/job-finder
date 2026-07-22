@@ -2784,10 +2784,24 @@ dialog.job-details-dialog[open]::backdrop {
   flex-direction: column;
   gap: 0.5rem;
 }
+.apply-input-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--warning);
+}
 .apply-input-prompt {
-  font-size: 0.88rem;
+  font-size: 0.9rem;
   color: var(--text-primary);
   font-weight: 500;
+}
+.apply-input-hint {
+  font-size: 0.74rem;
+  color: var(--text-muted);
 }
 .apply-input-row { display: flex; gap: 0.5rem; }
 .apply-input-row .input-text { flex: 1; }
@@ -2811,11 +2825,202 @@ dialog.job-details-dialog[open]::backdrop {
 .apply-log-details[open] summary { margin-bottom: 0.4rem; }
 @keyframes fade-in { from { opacity: 0.4; } to { opacity: 1; } }
 
+/* — Live "what the agent is doing in the browser" view (Task 10) — */
+/* Milestone stepper (5 nodes), reusing the wizard step-num visual language. */
+.apply-stepper {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.25rem;
+  margin: 0.75rem 0 0.25rem;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+.apply-step-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 1 1 0;
+  min-width: 58px;
+  position: relative;
+  text-align: center;
+}
+/* connector line between nodes */
+.apply-step-node:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 12px;
+  left: calc(50% + 15px);
+  right: calc(-50% + 15px);
+  height: 2px;
+  background: var(--border);
+}
+.apply-step-node.done:not(:last-child)::after { background: var(--success); }
+.apply-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  z-index: 1;
+  transition: all var(--transition-fast);
+}
+.apply-step-node.active .apply-step-num {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+  box-shadow: 0 0 0 4px var(--primary-glow);
+  animation: pulse-slow 1.6s infinite;
+}
+.apply-step-node.done .apply-step-num {
+  background: var(--success-glow);
+  border-color: var(--success);
+  color: var(--success);
+}
+.apply-step-label {
+  font-size: 0.68rem;
+  line-height: 1.2;
+  color: var(--text-muted);
+}
+.apply-step-node.active .apply-step-label { color: var(--text-primary); font-weight: 600; }
+.apply-step-node.done .apply-step-label { color: var(--text-secondary); }
+
+/* Live view: browser window + step timeline side by side. */
+.apply-live-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  align-items: start;
+}
+.apply-browser-frame {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-sm);
+}
+.apply-browser-urlbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border);
+}
+.apply-browser-dots { display: inline-flex; gap: 4px; }
+.apply-browser-dots i {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--border-strong);
+}
+.apply-browser-url {
+  flex: 1;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+}
+.apply-browser-live {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--danger);
+  white-space: nowrap;
+  animation: pulse-slow 1.6s infinite;
+}
+.apply-browser-viewport {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 150px;
+  background: var(--bg-base);
+}
+.apply-browser-shot { max-width: 100%; display: block; animation: fade-in 0.3s ease; }
+/* Live-stream canvas: scale the browser frame to the pane, keep aspect ratio. */
+.apply-browser-canvas { width: 100%; height: auto; image-rendering: auto; }
+.apply-browser-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2rem 1rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+/* Step timeline */
+.apply-steps { display: flex; flex-direction: column; gap: 0.35rem; }
+.apply-step-list {
+  list-style: none;
+  margin: 0.35rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.apply-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+}
+.apply-step-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  margin-top: 1px;
+}
+.apply-step-body { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+.apply-step-text { font-size: 0.82rem; color: var(--text-primary); line-height: 1.3; }
+.apply-step-detail { font-size: 0.72rem; color: var(--text-muted); }
+.apply-step-muted .apply-step-text { color: var(--text-muted); font-style: italic; }
+/* per-kind accents */
+.apply-step-milestone .apply-step-icon { background: var(--success-glow); border-color: var(--success); color: var(--success); }
+.apply-step-upload .apply-step-icon { background: var(--primary-glow); border-color: var(--primary); color: var(--primary); }
+.apply-step-done .apply-step-icon { background: var(--success); border-color: var(--success); color: #fff; }
+.apply-step-stopped .apply-step-icon { background: var(--warning-glow); border-color: var(--warning); color: var(--warning); }
+.apply-step-input .apply-step-icon { background: var(--warning-glow); border-color: var(--warning); color: var(--warning); }
+.apply-step-thought .apply-step-icon { background: transparent; color: var(--text-muted); }
+/* newest step while live */
+.apply-step-active {
+  background: var(--primary-glow);
+}
+.apply-step-active .apply-step-icon {
+  border-color: var(--primary);
+  color: var(--primary);
+  animation: pulse-slow 1.6s infinite;
+}
+.apply-step-active .apply-step-text { font-weight: 600; }
+
 /* Mobile: keep long stat labels ("Applications", "Interviewing") from clipping */
 @media (max-width: 480px) {
   .stat-label { font-size: 0.62rem; letter-spacing: 0.04em; }
   .apply-input-row { flex-direction: column; }
   .wizard-actions { flex-wrap: wrap; }
+  .apply-live-grid { grid-template-columns: 1fr; }
+  .apply-step-label { font-size: 0.6rem; }
 }
 
 /* — Agent-live card glow: green pulsing ring while the apply agent works a job,

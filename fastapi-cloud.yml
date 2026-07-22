@@ -16,6 +16,9 @@ env:
 # - DATABASE_URL: Neon Postgres connection string (include ?sslmode=require)
 # - EXA_API_KEY: Exa search API key
 # - TAVILY_API_KEY: Tavily search API key
+# - PLAYWRIGHT_MCP_URL: Origin of the deployed browser sidecar (deploy/playwright-mcp/),
+#   no trailing slash — without it the Auto-Apply agent is unavailable in prod
+# - PLAYWRIGHT_MCP_TOKEN: Bearer token the sidecar was deployed with
 
 # Health check configuration
 health_check:

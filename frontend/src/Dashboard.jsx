@@ -24,6 +24,16 @@ import {
   Check,
   LayoutGrid,
   List,
+  Globe,
+  MousePointerClick,
+  Type,
+  Upload,
+  Send,
+  ChevronsRight,
+  Loader2,
+  ListChecks,
+  MessageSquare,
+  Keyboard,
 } from 'lucide-react';
 import { Bot } from 'lucide-react';
 import { Link as RouterLink } from 'react-router-dom';
@@ -152,10 +162,15 @@ function Dashboard() {
   const [applyShotUrl, setApplyShotUrl] = useState(null);
   // Live milestone screenshot of an in-flight run (refreshed off the status poll).
   const [liveShotUrl, setLiveShotUrl] = useState(null);
+  // True while the CDP MJPEG stream is actively painting frames (remote sidecar only).
+  const [liveStreamOn, setLiveStreamOn] = useState(false);
+  const liveCanvasRef = useRef(null);
   // Controlled value for the human-in-the-loop input box (verification codes etc).
   const [applyInputValue, setApplyInputValue] = useState('');
   const applyPollersRef = useRef({});
   const applyPrevStatusRef = useRef({});
+  // Keeps the live step timeline pinned to the newest step.
+  const stepListRef = useRef(null);
 
   const JOBS_PER_PAGE = 12;
 
@@ -315,10 +330,12 @@ function Dashboard() {
           inputPrompt: data.apply_input_prompt || '',
           applicationId: data.application_id,
           lines: data.progress_lines || [],
+          steps: data.steps || [],
+          milestone: data.milestone || 0,
           hasLiveShot: !!data.has_live_screenshot,
         });
         if (data.apply_status === 'awaiting_input' && applyPrevStatusRef.current[jobId] !== 'awaiting_input') {
-          addToast('The apply agent needs your input — open the job to respond', 'error');
+          addToast('The apply agent needs an answer to keep filling the form — open the job to respond', 'error');
         }
         applyPrevStatusRef.current[jobId] = data.apply_status;
         if (data.apply_status && !APPLY_ACTIVE.has(data.apply_status)) {
@@ -342,7 +359,7 @@ function Dashboard() {
       const resp = await apiFetch(`/api/jobs/${jobId}/apply-agent`, { method: 'POST' });
       const data = await resp.json();
       if (resp.ok) {
-        setApplyState(jobId, { status: 'queued', error: '', applicationId: data.application_id, lines: [] });
+        setApplyState(jobId, { status: 'queued', error: '', applicationId: data.application_id, lines: [], steps: [], milestone: 0 });
         addToast('Apply agent started — filling out the application…', 'success');
         startApplyPolling(jobId);
       } else if (resp.status === 409 && data.detail?.missing_fields) {
@@ -372,6 +389,8 @@ function Dashboard() {
             error: app.apply_error || '',
             applicationId: app.id,
             lines: [],
+            steps: [],
+            milestone: 0,
           };
           if (APPLY_ACTIVE.has(app.apply_status)) startApplyPolling(app.job_id);
         }
@@ -388,6 +407,39 @@ function Dashboard() {
     needs_review: { label: 'Needs review', cls: 'apply-chip-warn' },
     failed: { label: 'Apply failed', cls: 'apply-chip-error' },
   };
+
+  // The 5-node milestone stepper mirrors the backend progress-NN milestones.
+  const APPLY_MILESTONES = ['Open form', 'Fill details', 'Upload resume', 'Ready to submit', 'Confirmation'];
+
+  // Icon per structured-step kind (from the backend `steps[]`).
+  const stepIcon = (kind) => {
+    const p = { size: 13 };
+    switch (kind) {
+      case 'navigate': return <Globe {...p} />;
+      case 'click': return <MousePointerClick {...p} />;
+      case 'fill': return <Type {...p} />;
+      case 'select': return <ListChecks {...p} />;
+      case 'upload': return <Upload {...p} />;
+      case 'select_key':
+      case 'key': return <Keyboard {...p} />;
+      case 'wait': return <Loader2 {...p} />;
+      case 'thought': return <MessageSquare {...p} />;
+      case 'input': return <Keyboard {...p} />;
+      case 'milestone': return <Check {...p} />;
+      case 'start': return <ChevronsRight {...p} />;
+      case 'done': return <Send {...p} />;
+      case 'stopped': return <X {...p} />;
+      default: return <Sparkles {...p} />;
+    }
+  };
+
+  // Most-recent page URL the agent navigated to (for the browser-frame URL bar).
+  const applyCurrentUrl = (st, fallback) => {
+    const steps = st?.steps || [];
+    for (let i = steps.length - 1; i >= 0; i--) if (steps[i].url) return steps[i].url;
+    return fallback || '';
+  };
+  const hostOf = (url) => { try { return new URL(url).hostname; } catch { return url || ''; } };
 
   const submitApplyInput = async (jobId) => {
     const value = applyInputValue.trim();
@@ -624,6 +676,94 @@ function Dashboard() {
     return () => { stopped = true; clearInterval(interval); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedJob?.id, applyStates[selectedJob?.id]?.status]);
+
+  // True live browser stream (remote sidecar CDP screencast) → MJPEG frames drawn
+  // to a canvas. Kept auth in the header via apiFetch (no token in URL). 404 (local
+  // mode / no run) leaves liveStreamOn=false so the screenshot view takes over.
+  // Reconnects on stream end while the run is active — this absorbs the managed
+  // host's request-duration cap (the stream is cut periodically), like the SSE log.
+  useEffect(() => {
+    const jobId = selectedJob?.id;
+    const state = jobId ? applyStates[jobId] : null;
+    const live = state && APPLY_ACTIVE.has(state.status);
+    if (!live) { setLiveStreamOn(false); return; }
+
+    let stopped = false;
+    let controller = null;
+
+    const indexOfCRLFCRLF = (buf, from) => {
+      for (let i = from; i + 3 < buf.length; i++) {
+        if (buf[i] === 13 && buf[i + 1] === 10 && buf[i + 2] === 13 && buf[i + 3] === 10) return i;
+      }
+      return -1;
+    };
+    const draw = async (jpeg) => {
+      const canvas = liveCanvasRef.current;
+      if (!canvas) return;
+      try {
+        const bitmap = await createImageBitmap(new Blob([jpeg], { type: 'image/jpeg' }));
+        if (stopped) { bitmap.close(); return; }
+        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+          canvas.width = bitmap.width; canvas.height = bitmap.height;
+        }
+        canvas.getContext('2d').drawImage(bitmap, 0, 0);
+        bitmap.close();
+        setLiveStreamOn(true);
+      } catch { /* skip a bad frame */ }
+    };
+
+    const runOnce = async () => {
+      controller = new AbortController();
+      const resp = await apiFetch(`/api/jobs/${jobId}/apply-agent/live-stream`, { signal: controller.signal });
+      if (!resp.ok || !resp.body) { const e = new Error('no-stream'); e.noStream = resp.status === 404; throw e; }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder('latin1');
+      let buf = new Uint8Array(0);
+      while (!stopped) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const merged = new Uint8Array(buf.length + value.length);
+        merged.set(buf); merged.set(value, buf.length); buf = merged;
+        // Extract as many complete frames as the buffer holds.
+        while (true) {
+          const headerEnd = indexOfCRLFCRLF(buf, 0);
+          if (headerEnd === -1) break;
+          const header = decoder.decode(buf.slice(0, headerEnd));
+          const m = header.match(/Content-Length:\s*(\d+)/i);
+          if (!m) { buf = buf.slice(headerEnd + 4); continue; }
+          const len = parseInt(m[1], 10);
+          const start = headerEnd + 4;
+          if (buf.length < start + len) break; // wait for the rest of this frame
+          await draw(buf.slice(start, start + len));
+          buf = buf.slice(start + len);
+        }
+      }
+    };
+
+    (async () => {
+      while (!stopped) {
+        try {
+          await runOnce();
+        } catch (err) {
+          if (stopped || err?.name === 'AbortError') return;
+          if (err?.noStream) { setLiveStreamOn(false); return; } // local mode / no stream — use screenshots
+        }
+        if (stopped) return;
+        setLiveStreamOn(false);
+        await new Promise((r) => setTimeout(r, 1500)); // brief backoff, then reconnect
+      }
+    })();
+
+    return () => { stopped = true; setLiveStreamOn(false); try { controller?.abort(); } catch {} };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedJob?.id, applyStates[selectedJob?.id]?.status]);
+
+  // Auto-scroll the step timeline to the newest step as it grows.
+  useEffect(() => {
+    const el = stepListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedJob?.id, applyStates[selectedJob?.id]?.steps?.length]);
 
   // health check
   useEffect(() => {
@@ -1776,9 +1916,10 @@ function Dashboard() {
                       </span>
                     )}
                   </div>
-                  {/* Human-in-the-loop: the paused agent is asking for something */}
+                  {/* Human-in-the-loop: the paused agent needs a value to fill a field */}
                   {applyStates[selectedJob.id].status === 'awaiting_input' && (
                     <div className="apply-input-panel" id="apply-input-panel">
+                      <span className="apply-input-label"><Keyboard size={13} /> The agent needs your answer to keep going</span>
                       <span className="apply-input-prompt">
                         {applyStates[selectedJob.id].inputPrompt || 'The agent needs your input to continue.'}
                       </span>
@@ -1789,43 +1930,114 @@ function Dashboard() {
                           value={applyInputValue}
                           onChange={(e) => setApplyInputValue(e.target.value)}
                           onKeyDown={(e) => { if (e.key === 'Enter') submitApplyInput(selectedJob.id); }}
-                          placeholder="Paste the code / answer here"
+                          placeholder="Type your answer here…"
                           autoFocus
                         />
                         <button className="btn btn-primary" onClick={() => submitApplyInput(selectedJob.id)}>
                           Send to agent
                         </button>
                       </div>
+                      <span className="apply-input-hint">The agent may ask a few of these while it fills the form. It will never ask for passwords or logins.</span>
                     </div>
                   )}
-                  {/* Live view while the agent works; stored screenshot afterwards */}
-                  {(liveShotUrl && APPLY_ACTIVE.has(applyStates[selectedJob.id].status)) ? (
-                    <div style={{ marginTop: '0.6rem' }}>
-                      <span className="control-label">Live view — what the agent sees</span>
-                      <img src={liveShotUrl} alt="Live view of the application the agent is filling" className="apply-screenshot apply-screenshot-live" />
-                      {(applyStates[selectedJob.id].lines || []).length > 0 && (
-                        <div className="apply-live-caption">
-                          {applyStates[selectedJob.id].lines.filter(l => !l.startsWith('[browser]') && !l.startsWith('[tool]')).slice(-1)[0]
-                            || applyStates[selectedJob.id].lines.slice(-1)[0]}
+                  {/* Milestone stepper + live browser view + step timeline */}
+                  {(() => {
+                    const st = applyStates[selectedJob.id];
+                    const steps = st.steps || [];
+                    const ms = st.milestone || 0;
+                    const isActive = APPLY_ACTIVE.has(st.status);
+                    const url = applyCurrentUrl(st, selectedJob.url);
+                    const host = hostOf(url);
+                    return (
+                      <>
+                        {/* 5-node milestone stepper */}
+                        <div className="apply-stepper" id="apply-stepper" role="list">
+                          {APPLY_MILESTONES.map((label, i) => {
+                            const n = i + 1;
+                            const complete = n < ms || (n === ms && !isActive && st.status !== 'awaiting_input');
+                            const active = n === ms && !complete;
+                            return (
+                              <div key={n} className={`apply-step-node ${complete ? 'done' : active ? 'active' : 'todo'}`} role="listitem">
+                                <span className="apply-step-num">{complete ? <Check size={13} /> : n}</span>
+                                <span className="apply-step-label">{label}</span>
+                              </div>
+                            );
+                          })}
                         </div>
-                      )}
-                    </div>
-                  ) : applyShotUrl && (
-                    <div style={{ marginTop: '0.6rem' }}>
-                      <span className="control-label">Final page screenshot</span>
-                      <img src={applyShotUrl} alt="Apply agent final page state" className="apply-screenshot" />
-                    </div>
-                  )}
-                  {(applyStates[selectedJob.id].lines || []).length > 0 && (
-                    <details className="apply-log-details">
-                      <summary>Activity log</summary>
-                      <div className="apply-progress-lines">
-                        {applyStates[selectedJob.id].lines.map((line, i) => (
-                          <span key={i} className="console-log-text log-system">{line}</span>
-                        ))}
-                      </div>
-                    </details>
-                  )}
+
+                        <div className="apply-live-grid" id="apply-live-view">
+                          {/* Live browser window: the screenshot framed as a browser */}
+                          <div className="apply-browser-frame">
+                            <div className="apply-browser-urlbar">
+                              <span className="apply-browser-dots"><i /><i /><i /></span>
+                              <span className="apply-browser-url" title={url}>{host || 'about:blank'}</span>
+                              {isActive && <span className="apply-browser-live">● live</span>}
+                            </div>
+                            <div className="apply-browser-viewport">
+                              {/* True live stream (canvas) stays mounted while active so the
+                                  MJPEG effect can draw into it; shown once frames flow. */}
+                              {isActive && (
+                                <canvas
+                                  ref={liveCanvasRef}
+                                  id="apply-live-canvas"
+                                  className="apply-browser-shot apply-browser-canvas"
+                                  style={{ display: liveStreamOn ? 'block' : 'none' }}
+                                />
+                              )}
+                              {!liveStreamOn && (
+                                (liveShotUrl && isActive) ? (
+                                  <img src={liveShotUrl} alt="Live view of the page the agent is on" className="apply-browser-shot" />
+                                ) : applyShotUrl ? (
+                                  <img src={applyShotUrl} alt="Final page the agent reached" className="apply-browser-shot" />
+                                ) : (
+                                  <div className="apply-browser-placeholder">
+                                    <Bot size={22} />
+                                    <span>{isActive ? 'Connecting to the live browser…' : 'No screenshot captured'}</span>
+                                  </div>
+                                )
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Live step timeline — what the agent is doing in the browser */}
+                          <div className="apply-steps" id="apply-step-timeline">
+                            <span className="control-label">What the agent is doing</span>
+                            <ol className="apply-step-list" ref={stepListRef}>
+                              {steps.length === 0 && (
+                                <li className="apply-step apply-step-muted">
+                                  <span className="apply-step-icon"><Loader2 size={13} /></span>
+                                  <span className="apply-step-body"><span className="apply-step-text">Getting started…</span></span>
+                                </li>
+                              )}
+                              {steps.map((s, i) => {
+                                const live = i === steps.length - 1 && isActive;
+                                return (
+                                  <li key={i} className={`apply-step apply-step-${s.kind || 'other'}${live ? ' apply-step-active' : ''}`}>
+                                    <span className="apply-step-icon">{stepIcon(s.kind)}</span>
+                                    <span className="apply-step-body">
+                                      <span className="apply-step-text">{s.title}</span>
+                                      {s.detail && <span className="apply-step-detail">{s.detail}</span>}
+                                    </span>
+                                  </li>
+                                );
+                              })}
+                            </ol>
+                          </div>
+                        </div>
+
+                        {(st.lines || []).length > 0 && (
+                          <details className="apply-log-details">
+                            <summary>Raw activity log</summary>
+                            <div className="apply-progress-lines">
+                              {st.lines.map((line, i) => (
+                                <span key={i} className="console-log-text log-system">{line}</span>
+                              ))}
+                            </div>
+                          </details>
+                        )}
+                      </>
+                    );
+                  })()}
                   {applyStates[selectedJob.id].status === 'needs_review' && selectedJob.url?.startsWith('http') && (
                     <a href={selectedJob.url} target="_blank" rel="noopener noreferrer" className="btn btn-sm" style={{ marginTop: '0.6rem', textDecoration: 'none' }}>
                       <LinkIcon size={13} /> Finish applying manually
